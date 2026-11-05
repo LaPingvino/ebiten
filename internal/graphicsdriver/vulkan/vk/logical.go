@@ -30,11 +30,8 @@ const (
 	StructureTypePhysicalDeviceFeatures2        StructureType = 1000059000
 )
 
-// Device and Queue are dispatchable handles.
-type (
-	Device uintptr
-	Queue  uintptr
-)
+// Queue is a dispatchable handle.
+type Queue uintptr
 
 // DeviceQueueCreateInfo is VkDeviceQueueCreateInfo.
 type DeviceQueueCreateInfo struct {
@@ -109,10 +106,10 @@ func GetPhysicalDeviceVulkan13Features(instance Instance, device PhysicalDevice)
 
 // CreateDevice is vkCreateDevice with one queue of the given family and the
 // given Vulkan 1.3 features enabled (nil: none).
-func CreateDevice(instance Instance, physical PhysicalDevice, queueFamily uint32, features13 *PhysicalDeviceVulkan13Features, extensions []string) (Device, error) {
+func CreateDevice(instance Instance, physical PhysicalDevice, queueFamily uint32, features13 *PhysicalDeviceVulkan13Features, extensions []string) (*Device, error) {
 	fn := procAddr(instance, "vkCreateDevice")
 	if fn == 0 {
-		return 0, fmt.Errorf("vk: vkCreateDevice is not available")
+		return nil, fmt.Errorf("vk: vkCreateDevice is not available")
 	}
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
@@ -150,49 +147,10 @@ func CreateDevice(instance Instance, physical PhysicalDevice, queueFamily uint32
 	}
 	pinner.Pin(info)
 
-	var device Device
-	r, _, _ := purego.SyscallN(fn, uintptr(physical), uintptr(unsafe.Pointer(info)), 0, uintptr(unsafe.Pointer(&device)))
+	var handle uintptr
+	r, _, _ := purego.SyscallN(fn, uintptr(physical), uintptr(unsafe.Pointer(info)), 0, uintptr(unsafe.Pointer(&handle)))
 	if err := result(r); err != nil {
-		return 0, err
+		return nil, err
 	}
-	return device, nil
-}
-
-// deviceProcAddr is vkGetDeviceProcAddr(device, name); 0 when the function
-// is not available.
-func deviceProcAddr(instance Instance, device Device, name string) uintptr {
-	get := procAddr(instance, "vkGetDeviceProcAddr")
-	if get == 0 {
-		return 0
-	}
-	n := cstr(name)
-	r, _, _ := purego.SyscallN(get, uintptr(device), uintptr(unsafe.Pointer(n)))
-	runtime.KeepAlive(n)
-	return r
-}
-
-// GetDeviceQueue is vkGetDeviceQueue.
-func GetDeviceQueue(instance Instance, device Device, family, index uint32) Queue {
-	var q Queue
-	if fn := deviceProcAddr(instance, device, "vkGetDeviceQueue"); fn != 0 {
-		purego.SyscallN(fn, uintptr(device), uintptr(family), uintptr(index), uintptr(unsafe.Pointer(&q)))
-	}
-	return q
-}
-
-// DeviceWaitIdle is vkDeviceWaitIdle.
-func DeviceWaitIdle(instance Instance, device Device) error {
-	fn := deviceProcAddr(instance, device, "vkDeviceWaitIdle")
-	if fn == 0 {
-		return fmt.Errorf("vk: vkDeviceWaitIdle is not available")
-	}
-	r, _, _ := purego.SyscallN(fn, uintptr(device))
-	return result(r)
-}
-
-// DestroyDevice is vkDestroyDevice.
-func DestroyDevice(instance Instance, device Device) {
-	if fn := deviceProcAddr(instance, device, "vkDestroyDevice"); fn != 0 {
-		purego.SyscallN(fn, uintptr(device), 0)
-	}
+	return newDevice(instance, handle)
 }

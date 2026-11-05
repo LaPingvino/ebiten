@@ -72,11 +72,11 @@ func TestDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer vk.DestroyDevice(instance, device)
-	if q := vk.GetDeviceQueue(instance, device, family, 0); q == 0 {
+	defer device.Destroy()
+	if q := device.Queue(family, 0); q == 0 {
 		t.Error("no queue")
 	}
-	if err := vk.DeviceWaitIdle(instance, device); err != nil {
+	if err := device.WaitIdle(); err != nil {
 		t.Error(err)
 	}
 }
@@ -98,15 +98,15 @@ func TestBufferRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer vk.DestroyDevice(instance, device)
+	defer device.Destroy()
 
 	const size = 256
-	buf, err := vk.CreateBuffer(instance, device, size, vk.BufferUsageTransferSrcBit|vk.BufferUsageVertexBufferBit)
+	buf, err := device.CreateBuffer(size, vk.BufferUsageTransferSrcBit|vk.BufferUsageVertexBufferBit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer vk.DestroyBuffer(instance, device, buf)
-	req := vk.GetBufferMemoryRequirements(instance, device, buf)
+	defer device.DestroyBuffer(buf)
+	req := device.BufferMemoryRequirements(buf)
 	if req.Size < size || req.MemoryTypeBits == 0 {
 		t.Fatalf("requirements %+v", req)
 	}
@@ -116,28 +116,28 @@ func TestBufferRoundTrip(t *testing.T) {
 		t.Fatalf("no host-visible, coherent memory among %d types", props.MemoryTypeCount)
 	}
 	t.Logf("%d memory types, %d heaps; buffer: %d bytes, alignment %d, type %d", props.MemoryTypeCount, props.MemoryHeapCount, req.Size, req.Alignment, typ)
-	mem, err := vk.AllocateMemory(instance, device, req.Size, typ)
+	mem, err := device.AllocateMemory(req.Size, typ)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer vk.FreeMemory(instance, device, mem)
-	if err := vk.BindBufferMemory(instance, device, buf, mem, 0); err != nil {
+	defer device.FreeMemory(mem)
+	if err := device.BindBufferMemory(buf, mem, 0); err != nil {
 		t.Fatal(err)
 	}
 
-	b, err := vk.MapMemory(instance, device, mem, 0, size)
+	b, err := device.MapMemory(mem, 0, size)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := range b {
 		b[i] = byte(i * 7)
 	}
-	vk.UnmapMemory(instance, device, mem)
-	b, err = vk.MapMemory(instance, device, mem, 0, size)
+	device.UnmapMemory(mem)
+	b, err = device.MapMemory(mem, 0, size)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer vk.UnmapMemory(instance, device, mem)
+	defer device.UnmapMemory(mem)
 	for i := range b {
 		if b[i] != byte(i*7) {
 			t.Fatalf("byte %d: %d, want %d", i, b[i], byte(i*7))

@@ -15,113 +15,135 @@
 package vk
 
 import (
-	"bytes"
-	"encoding/binary"
+	"fmt"
+	"runtime"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 )
 
-// PhysicalDeviceType is VkPhysicalDeviceType.
-type PhysicalDeviceType uint32
-
-const (
-	PhysicalDeviceTypeOther         PhysicalDeviceType = 0
-	PhysicalDeviceTypeIntegratedGPU PhysicalDeviceType = 1
-	PhysicalDeviceTypeDiscreteGPU   PhysicalDeviceType = 2
-	PhysicalDeviceTypeVirtualGPU    PhysicalDeviceType = 3
-	PhysicalDeviceTypeCPU           PhysicalDeviceType = 4
-)
-
-func (t PhysicalDeviceType) String() string {
-	switch t {
-	case PhysicalDeviceTypeIntegratedGPU:
-		return "integrated GPU"
-	case PhysicalDeviceTypeDiscreteGPU:
-		return "discrete GPU"
-	case PhysicalDeviceTypeVirtualGPU:
-		return "virtual GPU"
-	case PhysicalDeviceTypeCPU:
-		return "CPU"
-	}
-	return "other"
-}
-
-// PhysicalDeviceProperties is the part of VkPhysicalDeviceProperties the
-// driver uses.
-type PhysicalDeviceProperties struct {
-	APIVersion          uint32
-	DriverVersion       uint32
-	VendorID            uint32
-	DeviceID            uint32
-	DeviceType          PhysicalDeviceType
-	DeviceName          string
-	MaxImageDimension2D uint32
-}
-
-// The C struct's layout on 64-bit targets: four uint32s, the device type,
-// char deviceName[256], uint8_t pipelineCacheUUID[16], then
-// VkPhysicalDeviceLimits (8-byte aligned; maxImageDimension2D is its second
-// uint32) and VkPhysicalDeviceSparseProperties — 824 bytes in all.
-const (
-	propsSize         = 824
-	propsNameOffset   = 20
-	propsNameLen      = 256
-	propsLimitsOffset = 296
-)
-
-// GetPhysicalDeviceProperties is vkGetPhysicalDeviceProperties.
-func GetPhysicalDeviceProperties(instance Instance, device PhysicalDevice) PhysicalDeviceProperties {
-	var buf [propsSize]byte
-	if fn := procAddr(instance, "vkGetPhysicalDeviceProperties"); fn != 0 {
-		purego.SyscallN(fn, uintptr(device), uintptr(unsafe.Pointer(&buf[0])))
-	}
-	u32 := func(off int) uint32 { return binary.NativeEndian.Uint32(buf[off:]) }
-	name := buf[propsNameOffset : propsNameOffset+propsNameLen]
-	if i := bytes.IndexByte(name, 0); i >= 0 {
-		name = name[:i]
-	}
-	return PhysicalDeviceProperties{
-		APIVersion:          u32(0),
-		DriverVersion:       u32(4),
-		VendorID:            u32(8),
-		DeviceID:            u32(12),
-		DeviceType:          PhysicalDeviceType(u32(16)),
-		DeviceName:          string(name),
-		MaxImageDimension2D: u32(propsLimitsOffset + 4),
+// Device is a logical device and its functions, fetched once through
+// vkGetDeviceProcAddr when it is made: calls go straight to the driver,
+// without the loader's dispatch or a lookup per call.
+type Device struct {
+	handle uintptr
+	fn     struct {
+		destroyDevice, getDeviceQueue, deviceWaitIdle                              uintptr
+		createBuffer, destroyBuffer, getBufferMemoryRequirements, bindBufferMemory uintptr
+		allocateMemory, freeMemory, mapMemory, unmapMemory                         uintptr
 	}
 }
 
-// QueueFlags is VkQueueFlags.
-type QueueFlags uint32
-
-const (
-	QueueGraphicsBit QueueFlags = 0x1
-	QueueComputeBit  QueueFlags = 0x2
-	QueueTransferBit QueueFlags = 0x4
-)
-
-// QueueFamilyProperties is VkQueueFamilyProperties.
-type QueueFamilyProperties struct {
-	QueueFlags                  QueueFlags
-	QueueCount                  uint32
-	TimestampValidBits          uint32
-	MinImageTransferGranularity [3]uint32
+func newDevice(instance Instance, handle uintptr) (*Device, error) {
+	get := procAddr(instance, "vkGetDeviceProcAddr")
+	if get == 0 {
+		return nil, fmt.Errorf("vk: vkGetDeviceProcAddr is not available")
+	}
+	d := &Device{handle: handle}
+	for _, f := range []struct {
+		name string
+		p    *uintptr
+	}{
+		{"vkDestroyDevice", &d.fn.destroyDevice},
+		{"vkGetDeviceQueue", &d.fn.getDeviceQueue},
+		{"vkDeviceWaitIdle", &d.fn.deviceWaitIdle},
+		{"vkCreateBuffer", &d.fn.createBuffer},
+		{"vkDestroyBuffer", &d.fn.destroyBuffer},
+		{"vkGetBufferMemoryRequirements", &d.fn.getBufferMemoryRequirements},
+		{"vkBindBufferMemory", &d.fn.bindBufferMemory},
+		{"vkAllocateMemory", &d.fn.allocateMemory},
+		{"vkFreeMemory", &d.fn.freeMemory},
+		{"vkMapMemory", &d.fn.mapMemory},
+		{"vkUnmapMemory", &d.fn.unmapMemory},
+	} {
+		n := cstr(f.name)
+		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))
+		runtime.KeepAlive(n)
+		if *f.p == 0 {
+			if d.fn.destroyDevice != 0 {
+				purego.SyscallN(d.fn.destroyDevice, handle, 0)
+			}
+			return nil, fmt.Errorf("vk: the device has no %s", f.name)
+		}
+	}
+	return d, nil
 }
 
-// GetPhysicalDeviceQueueFamilyProperties is
-// vkGetPhysicalDeviceQueueFamilyProperties.
-func GetPhysicalDeviceQueueFamilyProperties(instance Instance, device PhysicalDevice) []QueueFamilyProperties {
-	fn := procAddr(instance, "vkGetPhysicalDeviceQueueFamilyProperties")
-	if fn == 0 {
-		return nil
+// Handle is the VkDevice.
+func (d *Device) Handle() uintptr { return d.handle }
+
+// Destroy is vkDestroyDevice.
+func (d *Device) Destroy() {
+	purego.SyscallN(d.fn.destroyDevice, d.handle, 0)
+	d.handle = 0
+}
+
+// Queue is vkGetDeviceQueue.
+func (d *Device) Queue(family, index uint32) Queue {
+	var q Queue
+	purego.SyscallN(d.fn.getDeviceQueue, d.handle, uintptr(family), uintptr(index), uintptr(unsafe.Pointer(&q)))
+	return q
+}
+
+// WaitIdle is vkDeviceWaitIdle.
+func (d *Device) WaitIdle() error {
+	r, _, _ := purego.SyscallN(d.fn.deviceWaitIdle, d.handle)
+	return result(r)
+}
+
+// CreateBuffer is vkCreateBuffer for a buffer used by one queue family.
+func (d *Device) CreateBuffer(size uint64, usage BufferUsageFlags) (Buffer, error) {
+	info := &BufferCreateInfo{SType: StructureTypeBufferCreateInfo, Size: size, Usage: usage}
+	var b Buffer
+	r, _, _ := purego.SyscallN(d.fn.createBuffer, d.handle, uintptr(unsafe.Pointer(info)), 0, uintptr(unsafe.Pointer(&b)))
+	runtime.KeepAlive(info)
+	return b, result(r)
+}
+
+// DestroyBuffer is vkDestroyBuffer.
+func (d *Device) DestroyBuffer(b Buffer) {
+	purego.SyscallN(d.fn.destroyBuffer, d.handle, uintptr(b), 0)
+}
+
+// BufferMemoryRequirements is vkGetBufferMemoryRequirements.
+func (d *Device) BufferMemoryRequirements(b Buffer) MemoryRequirements {
+	var req MemoryRequirements
+	purego.SyscallN(d.fn.getBufferMemoryRequirements, d.handle, uintptr(b), uintptr(unsafe.Pointer(&req)))
+	return req
+}
+
+// BindBufferMemory is vkBindBufferMemory.
+func (d *Device) BindBufferMemory(b Buffer, m DeviceMemory, offset uint64) error {
+	r, _, _ := purego.SyscallN(d.fn.bindBufferMemory, d.handle, uintptr(b), uintptr(m), uintptr(offset))
+	return result(r)
+}
+
+// AllocateMemory is vkAllocateMemory.
+func (d *Device) AllocateMemory(size uint64, typeIndex uint32) (DeviceMemory, error) {
+	info := &MemoryAllocateInfo{SType: StructureTypeMemoryAllocateInfo, AllocationSize: size, MemoryTypeIndex: typeIndex}
+	var m DeviceMemory
+	r, _, _ := purego.SyscallN(d.fn.allocateMemory, d.handle, uintptr(unsafe.Pointer(info)), 0, uintptr(unsafe.Pointer(&m)))
+	runtime.KeepAlive(info)
+	return m, result(r)
+}
+
+// FreeMemory is vkFreeMemory.
+func (d *Device) FreeMemory(m DeviceMemory) {
+	purego.SyscallN(d.fn.freeMemory, d.handle, uintptr(m), 0)
+}
+
+// MapMemory is vkMapMemory: the memory's bytes [offset, offset+size) as a
+// slice, valid until UnmapMemory. The memory must be host-visible.
+func (d *Device) MapMemory(m DeviceMemory, offset, size uint64) ([]byte, error) {
+	var p unsafe.Pointer
+	r, _, _ := purego.SyscallN(d.fn.mapMemory, d.handle, uintptr(m), uintptr(offset), uintptr(size), 0, uintptr(unsafe.Pointer(&p)))
+	if err := result(r); err != nil {
+		return nil, err
 	}
-	var n uint32
-	purego.SyscallN(fn, uintptr(device), uintptr(unsafe.Pointer(&n)), 0)
-	if n == 0 {
-		return nil
-	}
-	families := make([]QueueFamilyProperties, n)
-	purego.SyscallN(fn, uintptr(device), uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&families[0])))
-	return families[:n]
+	return unsafe.Slice((*byte)(p), size), nil
+}
+
+// UnmapMemory is vkUnmapMemory.
+func (d *Device) UnmapMemory(m DeviceMemory) {
+	purego.SyscallN(d.fn.unmapMemory, d.handle, uintptr(m))
 }
