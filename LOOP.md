@@ -54,9 +54,12 @@ V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop 
 ## Questions for Joop
 
 ## Blocked
+- Testing on this VPS needs lavapipe (Mesa's software Vulkan): `sudo pacman -S vulkan-swrast` (Joop). Until
+  then V2's device test can only be written, not run here.
 
 ## Tick log
 - 2026-11-05 — set up: clone of hajimehoshi/ebiten (main, c487dc97), branch `vulkan`, this LOOP. Sizing: the
   driver interface is ~15 methods; Metal's driver with its bindings ~5,000 lines; the MSL shader backend 745.
 - 2026-11-05 — public at github.com/LaPingvino/ebiten (fork; branch `vulkan`), Joop's yes; showcase quality the bar, upstreaming not the goal.
+- 2026-11-05 (V0 research, part 1 — overnight) — docs/vulkan/RESEARCH.md: the driver contract method by method (FlushMode → submit / present, ReadPixelsAsync's no-wait rule → copy + fence, Blend ↔ VkPipelineColorBlendAttachmentState, Resetter ↔ device lost), how internal/ui picks a driver (EBITENGINE_GRAPHICS_LIBRARY, the creator interface — what a "vulkan" choice needs), the Linux window (Ebitengine's own pure-Go X11 GLFW; GetX11Display / GetX11Window are what vkCreateXlibSurfaceKHR takes — no window-layer change), sizes, test tools here (spirv-val / spirv-dis yes; lavapipe no — Blocked, sudo). NEXT: part 2 — shaderir and the msl backend, the opengl / metal frame organisation, Ebitengine's Vulkan discussions.
 
