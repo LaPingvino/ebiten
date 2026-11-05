@@ -134,9 +134,38 @@ attributes, the same for every shader. `SetVertices` hands the batch's vertices 
 to them by `indexOffset` — so one vertex and one index buffer per frame (host-visible, written once, or
 staged), bound once.
 
+## 8. What Ebitengine's author has said about Vulkan
+
+[hajimehoshi/ebiten#389](https://github.com/hajimehoshi/ebiten/issues/389), "internal/graphicsdriver:
+support Vulkan", open since 2017. In the author's words: the expected benefits were faster rendering, faster
+and leaner "restoring" logic, and possibly triple buffering ("OpenGL can't control drivers"); "There is no
+concrete plan so far" (2017); "I agree Vulkan is too early … the implementation cost would be too huge. Thus,
+I'll wait and see" (2017). Later notes are about Android (Vulkan from API level 24 / Android 7, over 90% of
+devices by 2022). Most recently (March 2024): "As we have removed the `restorable` package, the priority got
+lower."
+
+So: no opposition, no plan, and one of the original reasons (restoring) gone. This branch doesn't depend on
+being taken up; if it ever is, the remaining arguments are the ones that still hold — the GPU on systems
+where OpenGL falls back to software but Vulkan doesn't (Crostini, some VMs and remote desktops), presentation
+control (mailbox / triple buffering), and Android.
+
+## 9. purego and a C API made of structs
+
+Vulkan's entry points take pointers to structs (`VkInstanceCreateInfo`, …) and return results through
+pointers — the shape purego handles best: Go structs laid out to match the C ones (fixed-size fields,
+explicit padding, `uintptr` for handles and pointers), passed by address; no struct is passed by value in
+the core API. Function pointers come from `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr`, so only the loader
+(`libvulkan.so.1`) is opened with purego's `Dlopen` and everything else is bound through those — the way
+Ebitengine's own OpenGL binding gets its functions. Points to handle:
+
+- **Pointers inside structs** (`pNext` chains, arrays of create-infos, strings): the memory they point to
+  must stay alive and not move during the call — pin with `runtime.Pinner` for the call's duration.
+- **Callbacks** (the debug messenger) need `purego.NewCallback`, which is limited in number; only for the
+  optional validation-layer output in debug builds.
+- **Handles**: dispatchable ones are pointers, non-dispatchable ones are 64-bit on every 64-bit target —
+  `uintptr` / `uint64` both fit; 32-bit targets would need care (Linux / BSD amd64 and arm64 first).
+
 ## Still to read (next ticks)
 
 - How the opengl and metal drivers organise a frame: vertex / index buffers, uniform layout per shader, image
   ↔ texture handling, the screen image, read-backs.
-- Ebitengine's own discussions of Vulkan (issues on hajimehoshi/ebiten) and the author's stance.
-- purego's limits for Vulkan (struct-heavy C API: passing pointers to Go-allocated structs, callbacks).
