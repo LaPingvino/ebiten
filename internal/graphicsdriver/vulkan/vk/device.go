@@ -31,6 +31,9 @@ type Device struct {
 		destroyDevice, getDeviceQueue, deviceWaitIdle                              uintptr
 		createBuffer, destroyBuffer, getBufferMemoryRequirements, bindBufferMemory uintptr
 		allocateMemory, freeMemory, mapMemory, unmapMemory                         uintptr
+		createCommandPool, destroyCommandPool, allocateCommandBuffers              uintptr
+		beginCommandBuffer, endCommandBuffer, cmdFillBuffer                        uintptr
+		queueSubmit, queueWaitIdle                                                 uintptr
 	}
 }
 
@@ -55,6 +58,14 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkFreeMemory", &d.fn.freeMemory},
 		{"vkMapMemory", &d.fn.mapMemory},
 		{"vkUnmapMemory", &d.fn.unmapMemory},
+		{"vkCreateCommandPool", &d.fn.createCommandPool},
+		{"vkDestroyCommandPool", &d.fn.destroyCommandPool},
+		{"vkAllocateCommandBuffers", &d.fn.allocateCommandBuffers},
+		{"vkBeginCommandBuffer", &d.fn.beginCommandBuffer},
+		{"vkEndCommandBuffer", &d.fn.endCommandBuffer},
+		{"vkCmdFillBuffer", &d.fn.cmdFillBuffer},
+		{"vkQueueSubmit", &d.fn.queueSubmit},
+		{"vkQueueWaitIdle", &d.fn.queueWaitIdle},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))

@@ -144,3 +144,78 @@ func TestBufferRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// The first command the device runs: vkCmdFillBuffer recorded into a command
+// buffer, submitted, waited for; the buffer then holds the word everywhere
+// the command wrote and the host's own bytes elsewhere.
+func TestFillBufferOnTheDevice(t *testing.T) {
+	instance, physical, family := testInstance(t)
+	device, err := vk.CreateDevice(instance, physical, family, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Destroy()
+	queue := device.Queue(family, 0)
+
+	const size = 1024
+	buf, err := device.CreateBuffer(size, vk.BufferUsageTransferDstBit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyBuffer(buf)
+	req := device.BufferMemoryRequirements(buf)
+	props := vk.GetPhysicalDeviceMemoryProperties(instance, physical)
+	typ, ok := props.FindMemoryType(req.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+	if !ok {
+		t.Skip("no host-visible, coherent memory")
+	}
+	mem, err := device.AllocateMemory(req.Size, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.FreeMemory(mem)
+	if err := device.BindBufferMemory(buf, mem, 0); err != nil {
+		t.Fatal(err)
+	}
+	b, err := device.MapMemory(mem, 0, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.UnmapMemory(mem)
+	for i := range b {
+		b[i] = 0x11
+	}
+
+	pool, err := device.CreateCommandPool(family, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyCommandPool(pool)
+	cb, err := device.AllocateCommandBuffer(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := device.BeginCommandBuffer(cb, vk.CommandBufferUsageOneTimeSubmitBit); err != nil {
+		t.Fatal(err)
+	}
+	device.CmdFillBuffer(cb, buf, 256, 512, 0xCAFEF00D)
+	if err := device.EndCommandBuffer(cb); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.QueueSubmit(queue, cb); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.QueueWaitIdle(queue); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := range b {
+		want := byte(0x11)
+		if i >= 256 && i < 768 {
+			want = [4]byte{0x0D, 0xF0, 0xFE, 0xCA}[i%4] // the word, little-endian
+		}
+		if b[i] != want {
+			t.Fatalf("byte %d: %#x, want %#x", i, b[i], want)
+		}
+	}
+}

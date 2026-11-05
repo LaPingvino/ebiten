@@ -57,6 +57,10 @@ func TestStructsMatchHeader(t *testing.T) {
 		"VkMemoryRequirements":             MemoryRequirements{},
 		"VkMemoryAllocateInfo":             MemoryAllocateInfo{},
 		"VkBufferCreateInfo":               BufferCreateInfo{},
+		"VkCommandPoolCreateInfo":          CommandPoolCreateInfo{},
+		"VkCommandBufferAllocateInfo":      CommandBufferAllocateInfo{},
+		"VkCommandBufferBeginInfo":         CommandBufferBeginInfo{},
+		"VkSubmitInfo":                     SubmitInfo{},
 	} {
 		start := strings.Index(h, "typedef struct "+c+" {")
 		if start < 0 {
@@ -110,6 +114,10 @@ func TestStructureTypesMatchHeader(t *testing.T) {
 		"VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2":          StructureTypePhysicalDeviceFeatures2,
 		"VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO":                StructureTypeMemoryAllocateInfo,
 		"VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO":                  StructureTypeBufferCreateInfo,
+		"VK_STRUCTURE_TYPE_SUBMIT_INFO":                         StructureTypeSubmitInfo,
+		"VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO":            StructureTypeCommandPoolCreateInfo,
+		"VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO":        StructureTypeCommandBufferAllocateInfo,
+		"VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO":           StructureTypeCommandBufferBeginInfo,
 	} {
 		m := regexp.MustCompile(`\b` + c + ` = (\d+),`).FindStringSubmatch(h)
 		if m == nil {
