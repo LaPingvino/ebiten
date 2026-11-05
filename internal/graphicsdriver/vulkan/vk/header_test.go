@@ -61,6 +61,14 @@ func TestStructsMatchHeader(t *testing.T) {
 		"VkCommandBufferAllocateInfo":      CommandBufferAllocateInfo{},
 		"VkCommandBufferBeginInfo":         CommandBufferBeginInfo{},
 		"VkSubmitInfo":                     SubmitInfo{},
+		"VkExtent3D":                       Extent3D{},
+		"VkOffset3D":                       Offset3D{},
+		"VkImageCreateInfo":                ImageCreateInfo{},
+		"VkImageSubresourceRange":          ImageSubresourceRange{},
+		"VkImageSubresourceLayers":         ImageSubresourceLayers{},
+		"VkImageMemoryBarrier2":            ImageMemoryBarrier2{},
+		"VkDependencyInfo":                 DependencyInfo{},
+		"VkBufferImageCopy":                BufferImageCopy{},
 	} {
 		start := strings.Index(h, "typedef struct "+c+" {")
 		if start < 0 {
@@ -118,6 +126,9 @@ func TestStructureTypesMatchHeader(t *testing.T) {
 		"VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO":            StructureTypeCommandPoolCreateInfo,
 		"VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO":        StructureTypeCommandBufferAllocateInfo,
 		"VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO":           StructureTypeCommandBufferBeginInfo,
+		"VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO":                   StructureTypeImageCreateInfo,
+		"VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2":              StructureTypeImageMemoryBarrier2,
+		"VK_STRUCTURE_TYPE_DEPENDENCY_INFO":                     StructureTypeDependencyInfo,
 	} {
 		m := regexp.MustCompile(`\b` + c + ` = (\d+),`).FindStringSubmatch(h)
 		if m == nil {
@@ -126,6 +137,51 @@ func TestStructureTypesMatchHeader(t *testing.T) {
 		}
 		if m[1] != strconv.FormatUint(uint64(v), 10) {
 			t.Errorf("%s = %s in the header, %d here", c, m[1], v)
+		}
+	}
+}
+
+// The enum and flag values written here by hand, against the header
+// ("NAME = 37," or "NAME = 0x00001000ULL;").
+func TestConstantsMatchHeader(t *testing.T) {
+	h := vulkanHeader(t)
+	for c, v := range map[string]uint64{
+		"VK_FORMAT_R8G8B8A8_UNORM":                        uint64(FormatR8G8B8A8Unorm),
+		"VK_IMAGE_LAYOUT_UNDEFINED":                       uint64(ImageLayoutUndefined),
+		"VK_IMAGE_LAYOUT_GENERAL":                         uint64(ImageLayoutGeneral),
+		"VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL":            uint64(ImageLayoutTransferSrcOptimal),
+		"VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL":            uint64(ImageLayoutTransferDstOptimal),
+		"VK_IMAGE_TYPE_2D":                                uint64(ImageType2D),
+		"VK_IMAGE_USAGE_TRANSFER_SRC_BIT":                 uint64(ImageUsageTransferSrcBit),
+		"VK_IMAGE_USAGE_TRANSFER_DST_BIT":                 uint64(ImageUsageTransferDstBit),
+		"VK_IMAGE_USAGE_SAMPLED_BIT":                      uint64(ImageUsageSampledBit),
+		"VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT":             uint64(ImageUsageColorAttachmentBit),
+		"VK_IMAGE_ASPECT_COLOR_BIT":                       uint64(ImageAspectColorBit),
+		"VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT":            PipelineStage2AllTransfer,
+		"VK_PIPELINE_STAGE_2_HOST_BIT":                    PipelineStage2Host,
+		"VK_ACCESS_2_TRANSFER_READ_BIT":                   Access2TransferRead,
+		"VK_ACCESS_2_TRANSFER_WRITE_BIT":                  Access2TransferWrite,
+		"VK_ACCESS_2_HOST_READ_BIT":                       Access2HostRead,
+		"VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT":             uint64(MemoryPropertyDeviceLocalBit),
+		"VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT":             uint64(MemoryPropertyHostVisibleBit),
+		"VK_MEMORY_PROPERTY_HOST_COHERENT_BIT":            uint64(MemoryPropertyHostCoherentBit),
+		"VK_BUFFER_USAGE_TRANSFER_SRC_BIT":                uint64(BufferUsageTransferSrcBit),
+		"VK_BUFFER_USAGE_TRANSFER_DST_BIT":                uint64(BufferUsageTransferDstBit),
+		"VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT":              uint64(BufferUsageUniformBufferBit),
+		"VK_BUFFER_USAGE_INDEX_BUFFER_BIT":                uint64(BufferUsageIndexBufferBit),
+		"VK_BUFFER_USAGE_VERTEX_BUFFER_BIT":               uint64(BufferUsageVertexBufferBit),
+		"VK_QUEUE_GRAPHICS_BIT":                           uint64(QueueGraphicsBit),
+		"VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT":     uint64(CommandBufferUsageOneTimeSubmitBit),
+		"VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT": uint64(CommandPoolCreateResetCommandBufferBit),
+	} {
+		m := regexp.MustCompile(`\b` + c + ` = (0x[0-9A-Fa-f]+|\d+)(?:ULL)?[,;]`).FindStringSubmatch(h)
+		if m == nil {
+			t.Errorf("%s: not in the header", c)
+			continue
+		}
+		got, err := strconv.ParseUint(m[1], 0, 64)
+		if err != nil || got != v {
+			t.Errorf("%s = %s in the header, %#x here", c, m[1], v)
 		}
 	}
 }

@@ -219,3 +219,109 @@ func TestFillBufferOnTheDevice(t *testing.T) {
 		}
 	}
 }
+
+// The first image: 4×3 RGBA, moved into transfer layout with a
+// synchronization2 barrier, cleared on the device to a colour, copied to a
+// host-visible buffer and read: every pixel the colour, as 8-bit RGBA.
+func TestClearImageAndReadBack(t *testing.T) {
+	instance, physical, family := testInstance(t)
+	device, err := vk.CreateDevice(instance, physical, family, &vk.PhysicalDeviceVulkan13Features{Synchronization2: 1, DynamicRendering: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Destroy()
+	queue := device.Queue(family, 0)
+	props := vk.GetPhysicalDeviceMemoryProperties(instance, physical)
+
+	const w, h = 4, 3
+	img, err := device.CreateImage2D(w, h, vk.FormatR8G8B8A8Unorm, vk.ImageUsageTransferSrcBit|vk.ImageUsageTransferDstBit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyImage(img)
+	ireq := device.ImageMemoryRequirements(img)
+	ityp, ok := props.FindMemoryType(ireq.MemoryTypeBits, 0)
+	if !ok {
+		t.Fatal("no memory type for the image")
+	}
+	imem, err := device.AllocateMemory(ireq.Size, ityp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.FreeMemory(imem)
+	if err := device.BindImageMemory(img, imem, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	buf, err := device.CreateBuffer(w*h*4, vk.BufferUsageTransferDstBit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyBuffer(buf)
+	breq := device.BufferMemoryRequirements(buf)
+	btyp, ok := props.FindMemoryType(breq.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+	if !ok {
+		t.Skip("no host-visible, coherent memory")
+	}
+	bmem, err := device.AllocateMemory(breq.Size, btyp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.FreeMemory(bmem)
+	if err := device.BindBufferMemory(buf, bmem, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := device.CreateCommandPool(family, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyCommandPool(pool)
+	cb, err := device.AllocateCommandBuffer(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := device.BeginCommandBuffer(cb, vk.CommandBufferUsageOneTimeSubmitBit); err != nil {
+		t.Fatal(err)
+	}
+	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+		DstStageMask: vk.PipelineStage2AllTransfer, DstAccessMask: vk.Access2TransferWrite,
+		OldLayout: vk.ImageLayoutUndefined, NewLayout: vk.ImageLayoutTransferDstOptimal,
+		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+		Image: img, SubresourceRange: vk.ColorRange,
+	})
+	device.CmdClearColorImage(cb, img, vk.ImageLayoutTransferDstOptimal, [4]float32{1, 0.5, 0, 1})
+	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+		SrcStageMask: vk.PipelineStage2AllTransfer, SrcAccessMask: vk.Access2TransferWrite,
+		DstStageMask: vk.PipelineStage2AllTransfer, DstAccessMask: vk.Access2TransferRead,
+		OldLayout: vk.ImageLayoutTransferDstOptimal, NewLayout: vk.ImageLayoutTransferSrcOptimal,
+		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+		Image: img, SubresourceRange: vk.ColorRange,
+	})
+	device.CmdCopyImageToBuffer(cb, img, vk.ImageLayoutTransferSrcOptimal, buf, vk.BufferImageCopy{
+		ImageSubresource: vk.ImageSubresourceLayers{AspectMask: vk.ImageAspectColorBit, LayerCount: 1},
+		ImageExtent:      vk.Extent3D{Width: w, Height: h, Depth: 1},
+	})
+	if err := device.EndCommandBuffer(cb); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.QueueSubmit(queue, cb); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.QueueWaitIdle(queue); err != nil {
+		t.Fatal(err)
+	}
+
+	px, err := device.MapMemory(bmem, 0, w*h*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.UnmapMemory(bmem)
+	for i := 0; i < w*h; i++ {
+		r, g, b, a := px[i*4], px[i*4+1], px[i*4+2], px[i*4+3]
+		if r != 255 || (g != 127 && g != 128) || b != 0 || a != 255 {
+			t.Fatalf("pixel %d: %d %d %d %d, want 255 127|128 0 255", i, r, g, b, a)
+		}
+	}
+	t.Logf("%d×%d pixels cleared on the device, read back: %v", w, h, px[:4])
+}
