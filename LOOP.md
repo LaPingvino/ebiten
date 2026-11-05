@@ -6,9 +6,15 @@ but Vulkan reaches the GPU (Crostini on Joop's Chromebook: Zed fast, goloco's GL
 would give Ebitengine games — goloco, GameViber's player — the real GPU. Zink (Mesa's GL-on-Vulkan) is the
 workaround meanwhile.
 
+Public: github.com/LaPingvino/ebiten, branch `vulkan` (Joop 2026-11-05: "make it public. I kinda want to make it
+attractive enough that people stop considering all AI work slop ;). So don't count on it being upstreamed
+either."). So the bar is the work itself: code a maintainer would be glad to read (Ebitengine's style, small
+focused commits with honest messages, tests, docs that say what works and what doesn't), not a pull request.
+
 This is a branch (`vulkan`) of hajimehoshi/ebiten: the graphics drivers are internal packages
 (internal/graphicsdriver/…), so a backend can't live in a module of its own. Aim: a driver good enough to
-offer upstream as a pull request — Ebitengine's style, its licence (Apache-2.0), its tests.
+stand next to the existing drivers — Ebitengine's style, its licence (Apache-2.0), its tests. Upstreaming is
+not the goal (Joop) — but nothing in it should stand in the way.
 
 Each tick: read this file, do ONE bounded chunk (~10 min), verify it, commit, update the queue + one tick-log
 line. Rotation: ~/Projects/empty/.idle-loop-next (goloco → gameviber → ebiten-vulkan → goloco).
@@ -23,8 +29,9 @@ line. Rotation: ~/Projects/empty/.idle-loop-next (goloco → gameviber → ebite
   written here — no glslang or other external compiler at run time.
 - **Verified on a GPU we can see**: tests against Vulkan's software driver (lavapipe) here on the VPS, and
   Joop's Chromebook (Crostini's Venus) for the real thing.
-- **Nothing public without Joop's yes**: the repo stays local until he says where it goes (a fork on his GitHub,
-  as gopus?).
+- **Showcase quality** (Joop): every commit something to be proud of — no half-finished stubs pushed as done,
+  no generated filler, measured claims only. Push to origin (the fork) after each verified tick; `upstream`
+  (hajimehoshi/ebiten) has its push URL disabled.
 
 ## Queue (top = next)
 V0. [ ] **Research** (docs/vulkan/RESEARCH.md): the graphicsdriver interface in detail (what metal / directx do
@@ -45,11 +52,11 @@ V5. [ ] The screen: the swapchain through glfw on X11; then Wayland.
 V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop tries it in Crostini.
 
 ## Questions for Joop
-- Where should it live: a public fork on your GitHub (LaPingvino/ebiten, branch `vulkan`, as gopus is public), or
-  local only for now? (Local until you say.)
 
 ## Blocked
 
 ## Tick log
 - 2026-11-05 — set up: clone of hajimehoshi/ebiten (main, c487dc97), branch `vulkan`, this LOOP. Sizing: the
   driver interface is ~15 methods; Metal's driver with its bindings ~5,000 lines; the MSL shader backend 745.
+- 2026-11-05 — public at github.com/LaPingvino/ebiten (fork; branch `vulkan`), Joop's yes; showcase quality the bar, upstreaming not the goal.
+
