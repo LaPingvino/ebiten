@@ -68,9 +68,45 @@ from Dmitri Shuralyov's packages, with permission — metal/README.md). The MSL 
 - **SPIR-V tools are here**: `spirv-val` and `spirv-dis` (spirv-tools), and `glslangValidator` — test-time
   checks for the SPIR-V backend, never run-time dependencies.
 
+## 6. The shader IR (internal/shaderir) and what SPIR-V needs from it
+
+Kage is compiled once, by Ebitengine, into `shaderir.Program` (program.go); each driver turns that into its
+own language. The backends that exist emit text: `glsl` (OpenGL, WebGL), `hlsl` (DirectX), `msl` (Metal — 587
++ 158 lines, the closest model), `pssl` (PlayStation 5). A SPIR-V backend emits a binary module instead, which
+changes the shape of the work but not its inputs:
+
+- **The program**: uniform names and types (packed by the driver into `[]uint32` — how each driver lays them
+  out still to read), `TextureCount` source images, vertex attributes, varyings, helper functions, and one
+  vertex and one fragment entry point.
+- **Types** (type.go): bool, int, float, vec2–4, ivec2–4, mat2–4, texture, arrays (with a length), structs.
+  All map directly onto SPIR-V types (`OpTypeBool`, `OpTypeInt 32 1`, `OpTypeFloat 32`, `OpTypeVector`,
+  `OpTypeMatrix`, `OpTypeArray`, `OpTypeStruct`); textures become a `sampler2D`-like combined image sampler or
+  a separate image + sampler pair.
+- **Statements**: expression, block, assign, init, if, for, continue, break, return, discard. SPIR-V wants
+  *structured* control flow: every `if` needs an `OpSelectionMerge` block, every `for` an `OpLoopMerge` with a
+  continue target — Kage's `for` has a fixed form (`ForVarType`, `ForInit`, `ForEnd`, `ForOp`, `ForDelta`), so
+  each loop maps to one canonical header / body / continue / merge shape. Local variables can stay
+  `OpVariable`s of `Function` storage with loads and stores — no SSA construction needed; drivers optimise.
+  `discard` is `OpKill` (or `OpTerminateInvocation`, SPIR-V 1.6).
+- **Expressions**: number literals, uniform / texture / local variables, struct members, swizzles, unary and
+  binary operators (arithmetic, component-wise vs. matrix multiply, shifts, comparisons, vector equality,
+  bit ops, `&&` / `||` — the short-circuit ones need control flow in SPIR-V, or `OpLogicalAnd` / `Or` where
+  both sides are side-effect free), selection (`?:`), calls, field selectors, indexing.
+- **Built-in functions** (56): constructors (`bool` … `mat4`) → `OpCompositeConstruct` / conversions; most of
+  the maths (`sin` … `refract`, `mix`, `smoothstep`, `clamp`, …) → the `GLSL.std.450` extended instruction set,
+  one instruction each; `dot` / `transpose` → core ops; `dfdx` / `dfdy` / `fwidth` → `OpDPdx` / `OpDPdy` /
+  `OpFwidth`; `mod` → `OpFMod` (GLSL's sign rule, not `OpFRem`); `atan2` → `Atan2`; `__texelAt` (the texture
+  read every Kage `imageSrcNAt` turns into) → an image sample at explicit LOD 0 with Ebitengine's nearest
+  filtering; `frontfacing` → the `FrontFacing` built-in; `len` / `cap` → constants (arrays are fixed size).
+
+So the emitter is: a type / constant table with de-duplication, a function writer with structured blocks, and
+an expression lowering — sized like the MSL backend plus a binary writer. `spirv-val` checks every module it
+writes in the tests; `spirv-dis` makes the tests' expected output readable.
+
 ## Still to read (next ticks)
 
-- shaderir: the IR's types and statements, and what the msl / hlsl backends emit (the model for SPIR-V).
+- How each driver packs the uniforms into `[]uint32` (std140-like alignment? per-driver?), and the vertex
+  layout (Ebitengine's fixed vertex format: position, texture coords, colour, custom attributes).
 - How the opengl and metal drivers organise a frame: vertex / index buffers, uniform layout per shader, image
   ↔ texture handling, the screen image, read-backs.
 - Ebitengine's own discussions of Vulkan (issues on hajimehoshi/ebiten) and the author's stance.
