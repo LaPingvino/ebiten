@@ -53,6 +53,11 @@ V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop 
 
 ## Questions for Joop
 
+## Notes for the next tick
+- RESEARCH.md §8, Joop 2026-11-05: "the author's main counter against Vulkan is implementation cost, in a time
+  LLMs weren't yet in the picture." — add it: the objection was the cost of writing and keeping a fourth
+  driver, which is exactly what this branch puts to the test.
+
 ## Blocked
 - Testing on this VPS needs lavapipe (Mesa's software Vulkan): `sudo pacman -S vulkan-swrast` (Joop). Until
   then V2's device test can only be written, not run here.
