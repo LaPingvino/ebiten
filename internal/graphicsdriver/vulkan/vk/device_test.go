@@ -89,3 +89,58 @@ func TestDeviceMissingExtension(t *testing.T) {
 		t.Fatalf("got %v, want VK_ERROR_EXTENSION_NOT_PRESENT", err)
 	}
 }
+
+// A host-visible buffer: made, its memory found, allocated, bound, written
+// through one mapping and read back through another.
+func TestBufferRoundTrip(t *testing.T) {
+	instance, physical, family := testInstance(t)
+	device, err := vk.CreateDevice(instance, physical, family, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vk.DestroyDevice(instance, device)
+
+	const size = 256
+	buf, err := vk.CreateBuffer(instance, device, size, vk.BufferUsageTransferSrcBit|vk.BufferUsageVertexBufferBit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vk.DestroyBuffer(instance, device, buf)
+	req := vk.GetBufferMemoryRequirements(instance, device, buf)
+	if req.Size < size || req.MemoryTypeBits == 0 {
+		t.Fatalf("requirements %+v", req)
+	}
+	props := vk.GetPhysicalDeviceMemoryProperties(instance, physical)
+	typ, ok := props.FindMemoryType(req.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+	if !ok {
+		t.Fatalf("no host-visible, coherent memory among %d types", props.MemoryTypeCount)
+	}
+	t.Logf("%d memory types, %d heaps; buffer: %d bytes, alignment %d, type %d", props.MemoryTypeCount, props.MemoryHeapCount, req.Size, req.Alignment, typ)
+	mem, err := vk.AllocateMemory(instance, device, req.Size, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vk.FreeMemory(instance, device, mem)
+	if err := vk.BindBufferMemory(instance, device, buf, mem, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := vk.MapMemory(instance, device, mem, 0, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range b {
+		b[i] = byte(i * 7)
+	}
+	vk.UnmapMemory(instance, device, mem)
+	b, err = vk.MapMemory(instance, device, mem, 0, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vk.UnmapMemory(instance, device, mem)
+	for i := range b {
+		if b[i] != byte(i*7) {
+			t.Fatalf("byte %d: %d, want %d", i, b[i], byte(i*7))
+		}
+	}
+}
