@@ -163,3 +163,38 @@ func TestConstantsOnce(t *testing.T) {
 		t.Errorf("vec4 twice: %d, %d", a, b)
 	}
 }
+
+// indexTriangle is a vertex shader with no vertex input: its three positions
+// come from gl_VertexIndex, x = float((i << 1) & 2) * scale - 1 and
+// y = float(i & 2) * scale - 1 — scale 2 is the full-screen triangle, 1 the
+// half of the screen above the diagonal.
+func indexTriangle(scale float32) *spirv.Module {
+	m := spirv.NewModule()
+	m.Capability(spirv.CapabilityShader)
+	m.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	i32, f32 := m.TypeInt(32, true), m.TypeFloat(32)
+	vec4 := m.TypeVector(f32, 4)
+	index := m.Variable(m.TypePointer(spirv.StorageClassInput, i32), spirv.StorageClassInput)
+	m.Decorate(index, spirv.DecorationBuiltIn, spirv.BuiltInVertexIndex)
+	pos := m.Variable(m.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	m.Decorate(pos, spirv.DecorationBuiltIn, spirv.BuiltInPosition)
+	one, two, k := m.ConstantInt32(1), m.ConstantInt32(2), m.ConstantFloat32(scale)
+	fzero, fone := m.ConstantFloat32(0), m.ConstantFloat32(1)
+	void := m.TypeVoid()
+	main := m.Function(void, m.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		i := f.Load(i32, index)
+		x := f.FSub(f32, f.FMul(f32, f.ConvertSToF(f32, f.BitwiseAnd(i32, f.ShiftLeftLogical(i32, i, one), two)), k), fone)
+		y := f.FSub(f32, f.FMul(f32, f.ConvertSToF(f32, f.BitwiseAnd(i32, i, two)), k), fone)
+		f.Store(pos, f.CompositeConstruct(vec4, x, y, fzero, fone))
+		f.Return()
+	})
+	m.EntryPoint(spirv.ExecutionModelVertex, main, "main", index, pos)
+	return m
+}
+
+// The vertex shader computing its positions from gl_VertexIndex: integer
+// constants, shifts, masks, conversion, float arithmetic, a vector built.
+func TestIndexTriangleVertex(t *testing.T) {
+	validate(t, indexTriangle(2).Bytes())
+}

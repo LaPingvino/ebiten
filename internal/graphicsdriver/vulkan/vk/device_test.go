@@ -18,6 +18,7 @@ package vk_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
@@ -357,7 +358,7 @@ func TestShaderModuleFromSPIRV(t *testing.T) {
 
 // shaders is the backend's constant-colour fragment shader and a vertex
 // shader that puts every vertex at one point (a draw that covers nothing).
-func shaders(t *testing.T, device *vk.Device, rgba [4]float32) (vk.ShaderModule, vk.ShaderModule) {
+func shaders(t *testing.T, device *vk.Device, rgba [4]float32, scale float32) (vk.ShaderModule, vk.ShaderModule) {
 	t.Helper()
 	frag := spirv.NewModule()
 	frag.Capability(spirv.CapabilityShader)
@@ -375,20 +376,30 @@ func shaders(t *testing.T, device *vk.Device, rgba [4]float32) (vk.ShaderModule,
 	frag.EntryPoint(spirv.ExecutionModelFragment, fmain, "main", out)
 	frag.ExecutionMode(fmain, spirv.ExecutionModeOriginUpperLeft)
 
+	// The vertex shader: positions from gl_VertexIndex, x = float((i << 1) & 2)
+	// * scale - 1, y = float(i & 2) * scale - 1 — scale 2 covers the target,
+	// 1 the half above its diagonal, 0 nothing (all three at a corner).
 	vert := spirv.NewModule()
 	vert.Capability(spirv.CapabilityShader)
 	vert.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
-	vvec4 := vert.TypeVector(vert.TypeFloat(32), 4)
+	i32, f32 := vert.TypeInt(32, true), vert.TypeFloat(32)
+	vvec4 := vert.TypeVector(f32, 4)
+	index := vert.Variable(vert.TypePointer(spirv.StorageClassInput, i32), spirv.StorageClassInput)
+	vert.Decorate(index, spirv.DecorationBuiltIn, spirv.BuiltInVertexIndex)
 	pos := vert.Variable(vert.TypePointer(spirv.StorageClassOutput, vvec4), spirv.StorageClassOutput)
 	vert.Decorate(pos, spirv.DecorationBuiltIn, spirv.BuiltInPosition)
+	ione, itwo, k := vert.ConstantInt32(1), vert.ConstantInt32(2), vert.ConstantFloat32(scale)
 	zero, one := vert.ConstantFloat32(0), vert.ConstantFloat32(1)
 	vvoid := vert.TypeVoid()
 	vmain := vert.Function(vvoid, vert.TypeFunction(vvoid), func(f *spirv.Function) {
 		f.Label()
-		f.Store(pos, vert.ConstantComposite(vvec4, zero, zero, zero, one))
+		i := f.Load(i32, index)
+		x := f.FSub(f32, f.FMul(f32, f.ConvertSToF(f32, f.BitwiseAnd(i32, f.ShiftLeftLogical(i32, i, ione), itwo)), k), one)
+		y := f.FSub(f32, f.FMul(f32, f.ConvertSToF(f32, f.BitwiseAnd(i32, i, itwo)), k), one)
+		f.Store(pos, f.CompositeConstruct(vvec4, x, y, zero, one))
 		f.Return()
 	})
-	vert.EntryPoint(spirv.ExecutionModelVertex, vmain, "main", pos)
+	vert.EntryPoint(spirv.ExecutionModelVertex, vmain, "main", index, pos)
 
 	vs, err := device.CreateShaderModule(vert.Words())
 	if err != nil {
@@ -404,7 +415,11 @@ func shaders(t *testing.T, device *vk.Device, rgba [4]float32) (vk.ShaderModule,
 // Dynamic rendering through a graphics pipeline made of the backend's
 // shaders: the attachment cleared by the rendering's load op, the pipeline
 // bound, viewport and scissor set, a draw recorded; the image read back.
-func TestRenderingWithPipeline(t *testing.T) {
+// draw renders the backend's shaders' triangle (red, at a scale) into a w×h
+// RGBA image cleared blue — dynamic rendering through a graphics pipeline —
+// and reads the image back.
+func draw(t *testing.T, w, h uint32, scale float32) []byte {
+	t.Helper()
 	instance, physical, family := testInstance(t)
 	device, err := vk.CreateDevice(instance, physical, family, &vk.PhysicalDeviceVulkan13Features{Synchronization2: 1, DynamicRendering: 1}, nil)
 	if err != nil {
@@ -414,7 +429,6 @@ func TestRenderingWithPipeline(t *testing.T) {
 	queue := device.Queue(family, 0)
 	props := vk.GetPhysicalDeviceMemoryProperties(instance, physical)
 
-	const w, h = 4, 4
 	img, err := device.CreateImage2D(w, h, vk.FormatR8G8B8A8Unorm, vk.ImageUsageColorAttachmentBit|vk.ImageUsageTransferSrcBit)
 	if err != nil {
 		t.Fatal(err)
@@ -436,7 +450,7 @@ func TestRenderingWithPipeline(t *testing.T) {
 	}
 	defer device.DestroyImageView(view)
 
-	vs, fs := shaders(t, device, [4]float32{1, 0, 0, 1})
+	vs, fs := shaders(t, device, [4]float32{1, 0, 0, 1}, scale)
 	defer device.DestroyShaderModule(vs)
 	defer device.DestroyShaderModule(fs)
 	layout, err := device.CreatePipelineLayout()
@@ -450,7 +464,7 @@ func TestRenderingWithPipeline(t *testing.T) {
 	}
 	defer device.DestroyPipeline(pipeline)
 
-	buf, err := device.CreateBuffer(w*h*4, vk.BufferUsageTransferDstBit)
+	buf, err := device.CreateBuffer(uint64(w*h*4), vk.BufferUsageTransferDstBit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +504,7 @@ func TestRenderingWithPipeline(t *testing.T) {
 	area := vk.Rect2D{Extent: vk.Extent2D{Width: w, Height: h}}
 	device.CmdBeginRendering(cb, view, area, [4]float32{0, 0, 1, 1})
 	device.CmdBindGraphicsPipeline(cb, pipeline)
-	device.CmdSetViewport(cb, vk.Viewport{Width: w, Height: h, MaxDepth: 1})
+	device.CmdSetViewport(cb, vk.Viewport{Width: float32(w), Height: float32(h), MaxDepth: 1})
 	device.CmdSetScissor(cb, area)
 	device.CmdDraw(cb, 3, 1, 0, 0)
 	device.CmdEndRendering(cb)
@@ -514,14 +528,72 @@ func TestRenderingWithPipeline(t *testing.T) {
 	if err := device.QueueWaitIdle(queue); err != nil {
 		t.Fatal(err)
 	}
-	px, err := device.MapMemory(bmem, 0, w*h*4)
+	px, err := device.MapMemory(bmem, 0, uint64(w*h*4))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer device.UnmapMemory(bmem)
-	for i := 0; i < w*h; i++ {
-		if got := [4]byte(px[i*4 : i*4+4]); got != [4]byte{0, 0, 255, 255} {
-			t.Fatalf("pixel %d: %v, want the clear colour 0 0 255 255", i, got)
+	return append([]byte(nil), px...)
+}
+
+var (
+	red  = [4]byte{255, 0, 0, 255}
+	blue = [4]byte{0, 0, 255, 255} // the clear colour
+)
+
+// A degenerate triangle (all three vertices at one corner) draws nothing:
+// every pixel keeps the clear colour.
+func TestRenderingWithPipeline(t *testing.T) {
+	px := draw(t, 4, 4, 0)
+	for i := 0; i < 16; i++ {
+		if got := [4]byte(px[i*4 : i*4+4]); got != blue {
+			t.Fatalf("pixel %d: %v, want the clear colour %v", i, got, blue)
 		}
 	}
+}
+
+// The full-screen triangle (positions from gl_VertexIndex) covers every
+// pixel with the fragment shader's colour.
+func TestFullScreenTriangle(t *testing.T) {
+	px := draw(t, 4, 4, 2)
+	for i := 0; i < 16; i++ {
+		if got := [4]byte(px[i*4 : i*4+4]); got != red {
+			t.Fatalf("pixel %d: %v, want the triangle's %v", i, got, red)
+		}
+	}
+}
+
+// The half triangle — (-1,-1) (1,-1) (-1,1), y down in Vulkan — covers the
+// pixels above the anti-diagonal and leaves those below it; the pixels whose
+// centres lie on the edge go by the rasterizer's tie rule and are not
+// checked.
+func TestHalfTriangle(t *testing.T) {
+	const n = 8
+	px := draw(t, n, n, 1)
+	var rows []string
+	for y := 0; y < n; y++ {
+		row := ""
+		for x := 0; x < n; x++ {
+			got := [4]byte(px[(y*n+x)*4:][:4])
+			switch {
+			case got == red:
+				row += "#"
+			case got == blue:
+				row += "."
+			default:
+				row += "?"
+			}
+			want := blue
+			if x+y < n-1 {
+				want = red
+			} else if x+y == n-1 {
+				continue
+			}
+			if got != want {
+				t.Errorf("pixel (%d,%d): %v, want %v", x, y, got, want)
+			}
+		}
+		rows = append(rows, row)
+	}
+	t.Logf("drawn:\n%s", strings.Join(rows, "\n"))
 }

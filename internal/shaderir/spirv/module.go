@@ -34,28 +34,34 @@ const (
 
 // Opcodes (§3.52) the module uses.
 const (
-	opName              = 5
-	opMemoryModel       = 14
-	opEntryPoint        = 15
-	opExecutionMode     = 16
-	opCapability        = 17
-	opTypeVoid          = 19
-	opTypeBool          = 20
-	opTypeInt           = 21
-	opTypeFloat         = 22
-	opTypeVector        = 23
-	opTypePointer       = 32
-	opConstant          = 43
-	opConstantComposite = 44
-	opVariable          = 59
-	opLoad              = 61
-	opStore             = 62
-	opDecorate          = 71
-	opTypeFunction      = 33
-	opFunction          = 54
-	opFunctionEnd       = 56
-	opLabel             = 248
-	opReturn            = 253
+	opName               = 5
+	opMemoryModel        = 14
+	opEntryPoint         = 15
+	opExecutionMode      = 16
+	opCapability         = 17
+	opTypeVoid           = 19
+	opTypeBool           = 20
+	opTypeInt            = 21
+	opTypeFloat          = 22
+	opTypeVector         = 23
+	opTypePointer        = 32
+	opConstant           = 43
+	opConstantComposite  = 44
+	opVariable           = 59
+	opLoad               = 61
+	opStore              = 62
+	opDecorate           = 71
+	opTypeFunction       = 33
+	opFunction           = 54
+	opFunctionEnd        = 56
+	opCompositeConstruct = 80
+	opConvertSToF        = 111
+	opFSub               = 131
+	opFMul               = 133
+	opShiftLeftLogical   = 196
+	opBitwiseAnd         = 199
+	opLabel              = 248
+	opReturn             = 253
 )
 
 // Operand values.
@@ -216,6 +222,13 @@ func (m *Module) ConstantFloat32(v float32) uint32 {
 	return m.typeID(key("cf", f, bits), func(id uint32) { inst(&m.types, opConstant, f, id, bits) })
 }
 
+// ConstantInt32 is a 32-bit signed integer constant (written once per value).
+func (m *Module) ConstantInt32(v int32) uint32 {
+	i := m.TypeInt(32, true)
+	bits := uint32(v)
+	return m.typeID(key("ci", i, bits), func(id uint32) { inst(&m.types, opConstant, i, id, bits) })
+}
+
 // ConstantComposite is a composite constant (a vector of constants).
 func (m *Module) ConstantComposite(typ uint32, parts ...uint32) uint32 {
 	return m.typeID(key("cc", append([]uint32{typ}, parts...)...), func(id uint32) {
@@ -264,6 +277,33 @@ func (f *Function) Load(typ, pointer uint32) uint32 {
 	id := f.m.ID()
 	inst(&f.m.functions, opLoad, typ, id, pointer)
 	return id
+}
+
+// op writes an instruction with a result of a type, returning the result.
+func (f *Function) op(op uint16, typ uint32, operands ...uint32) uint32 {
+	id := f.m.ID()
+	inst(&f.m.functions, op, append([]uint32{typ, id}, operands...)...)
+	return id
+}
+
+// ShiftLeftLogical is a << shift (integers).
+func (f *Function) ShiftLeftLogical(typ, a, shift uint32) uint32 {
+	return f.op(opShiftLeftLogical, typ, a, shift)
+}
+
+// BitwiseAnd is a & b (integers).
+func (f *Function) BitwiseAnd(typ, a, b uint32) uint32 { return f.op(opBitwiseAnd, typ, a, b) }
+
+// ConvertSToF is a signed integer as a float.
+func (f *Function) ConvertSToF(typ, a uint32) uint32 { return f.op(opConvertSToF, typ, a) }
+
+// FMul is a * b; FSub is a - b (floats or float vectors).
+func (f *Function) FMul(typ, a, b uint32) uint32 { return f.op(opFMul, typ, a, b) }
+func (f *Function) FSub(typ, a, b uint32) uint32 { return f.op(opFSub, typ, a, b) }
+
+// CompositeConstruct builds a composite (a vector) from its parts.
+func (f *Function) CompositeConstruct(typ uint32, parts ...uint32) uint32 {
+	return f.op(opCompositeConstruct, typ, parts...)
 }
 
 // Return ends a block, returning nothing.
