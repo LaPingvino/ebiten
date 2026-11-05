@@ -44,7 +44,7 @@ V1. [x] (WRITTEN 2026-11-05: docs/vulkan/DESIGN.md — for Joop to read; buildin
     emitter's shape, the driver's structure (one queue, a frame's command buffer, staging buffers, pipelines per
     shader × blend × dst format, descriptor sets, the swapchain), what's out of scope at first (Wayland? only
     X11?), how it's tested. Then build.
-V2. [ ] (STARTED 2026-11-05: loader, instance, devices — tested) The purego Vulkan loader + an instance / device / headless image test on lavapipe.
+V2. [ ] (STARTED 2026-11-05: loader, instance, devices, properties, queue families — tested on lavapipe) The purego Vulkan loader + an instance / device / headless image test on lavapipe.
 V3. [ ] SPIR-V backend for shaderir, checked with spirv-val where available (a test tool, not a run-time dependency).
 V4. [ ] The driver: images, DrawTriangles, WritePixels / ReadPixelsAsync — Ebitengine's own tests with
     EBITENGINE_GRAPHICS_LIBRARY=vulkan.
@@ -54,8 +54,9 @@ V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop 
 ## Questions for Joop
 
 ## Blocked
-- Testing on this VPS needs lavapipe (Mesa's software Vulkan): `sudo pacman -S vulkan-swrast` (Joop). Until
-  then V2's device test can only be written, not run here.
+- (none) — RESOLVED 2026-11-05: lavapipe is already installed (vulkan-swrast 26.2.6 owns lvp_icd.json); the
+  device here is "llvmpipe (LLVM 23.1.4, 256 bits)", Vulkan 1.4, one queue family with graphics. Driver tests
+  run on this VPS.
 
 ## Tick log
 - 2026-11-05 — set up: clone of hajimehoshi/ebiten (main, c487dc97), branch `vulkan`, this LOOP. Sizing: the
@@ -68,4 +69,5 @@ V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop 
 - 2026-11-05 (V0 done — overnight) — RESEARCH.md §8 gains Joop's point (the author's objection was implementation cost, weighed before LLMs — this branch tests whether it still holds); §10: a frame as the Metal driver runs it (one command buffer committed at every End, present on FlushModePresent; an encoder per destination; pooled per-frame vertex / index buffers recycled when the frame is done; the drawable fetched at the first screen draw) and the Vulkan shape of each (submit + fence per End, dynamic rendering per destination with layout barriers, a mapped ring per frame in flight, acquire / present semaphores, copy-to-buffer read-backs). NEXT: V1 — DESIGN.md.
 - 2026-11-05 (V1: the design — overnight) — docs/vulkan/DESIGN.md: scope (Linux / BSD, amd64 / arm64, X11 + XWayland first; native Wayland, Windows, Apple, Android, 32-bit later), the three packages (vk bindings, the driver, shaderir/spirv), and the decisions with their reasons: Vulkan 1.3 baseline (dynamic rendering, synchronization2), two frames in flight with a mapped ring each, render runs per destination with layout barriers, pipelines cached by shader × blend × format, std140 uniforms with dynamic offsets (too big for push constants), the projection's Y negated as Metal does, nearest clamp-to-edge samplers, R8G8B8A8 images with staged uploads and fenced read-backs, the swapchain from the X11 window (FIFO / MAILBOX / IMMEDIATE), device loss through Resetter; testing (spirv-val, lavapipe, Ebitengine's own suites with EBITENGINE_GRAPHICS_LIBRARY=vulkan, Crostini); the order of work. NEXT: V2 — the vk loader (writing it doesn't need lavapipe; running its test does — Blocked item).
 - 2026-11-05 (V2 part 1 — overnight) — internal/graphicsdriver/vulkan/vk: libvulkan.so.1 through purego's Dlopen / Dlsym (vkGetInstanceProcAddr only; everything else through it), Result as an error type, the API-version helpers, ApplicationInfo / InstanceCreateInfo in C layout, EnumerateInstanceVersion, CreateInstance (strings and structs pinned with runtime.Pinner for the call), DestroyInstance, EnumeratePhysicalDevices. Tests run here: the loader offers Vulkan 1.4.363; an instance at 1.3 is created and destroyed; it lists 1 physical device — although only radeon's ICD is installed: to identify (vkGetPhysicalDeviceProperties) — it may mean device tests can run here without lavapipe; a missing extension comes back as VK_ERROR_EXTENSION_NOT_PRESENT. NEXT: physical-device properties and queue families, then a logical device.
+- 2026-11-05 (V2 part 2 — overnight) — vkGetPhysicalDeviceProperties (header fields and maxImageDimension2D read from the 824-byte C struct at fixed 64-bit offsets, so the large limits struct needn't be mirrored yet) and vkGetPhysicalDeviceQueueFamilyProperties. The test now names the device: lavapipe ("llvmpipe (LLVM 23.1.4, 256 bits)", CPU type, Vulkan 1.4, max 2D image 16384, one queue family with graphics/compute/transfer) — so vulkan-swrast was installed all along; the Blocked item is gone. NEXT: the logical device and its queue (vkCreateDevice with dynamic rendering, 1.3 features), then a headless image cleared to a colour and read back.
 

@@ -50,6 +50,23 @@ func TestInstance(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("%d physical device(s)", len(devices))
+	for _, d := range devices {
+		p := vk.GetPhysicalDeviceProperties(instance, d)
+		t.Logf("  %q (%s), Vulkan %d.%d, vendor %#x, max 2D image %d", p.DeviceName, p.DeviceType,
+			vk.VersionMajor(p.APIVersion), vk.VersionMinor(p.APIVersion), p.VendorID, p.MaxImageDimension2D)
+		if p.DeviceName == "" || p.MaxImageDimension2D < 4096 {
+			t.Errorf("properties read wrong: %+v (Vulkan guarantees a 2D image of at least 4096)", p)
+		}
+		families := vk.GetPhysicalDeviceQueueFamilyProperties(instance, d)
+		graphics := false
+		for i, f := range families {
+			t.Logf("  queue family %d: flags %#x, %d queue(s)", i, f.QueueFlags, f.QueueCount)
+			graphics = graphics || f.QueueFlags&vk.QueueGraphicsBit != 0 && f.QueueCount > 0
+		}
+		if !graphics {
+			t.Errorf("%q has no graphics queue", p.DeviceName)
+		}
+	}
 }
 
 // Asking for an extension no driver has fails with
