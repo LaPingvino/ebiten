@@ -103,10 +103,39 @@ So the emitter is: a type / constant table with de-duplication, a function write
 an expression lowering — sized like the MSL backend plus a binary writer. `spirv-val` checks every module it
 writes in the tests; `spirv-dis` makes the tests' expected output readable.
 
+## 7. Uniforms and vertices: what arrives, and what each driver does with it
+
+**Uniforms** reach `DrawTriangles` as one tightly packed `[]uint32` in the order of
+`shaderir.Program.Uniforms`. Every Ebitengine shader starts with seven preserved uniforms
+(internal/graphics/vertex.go): the destination texture size, the source texture sizes, the destination region
+origin and size, the source region origins and sizes (one per source image), and the projection matrix
+(`ProjectionMatrixUniformVariableIndex` = 6, a mat4). The user's Kage uniforms follow.
+
+Each driver repacks that into its API's layout:
+
+- **Metal** (`appendUniformVariables`, graphics_darwin.go): MSL alignment per type, vec3 / mat3 padded to
+  four components, bools packed by byte — and the projection matrix's Y negated, because Metal's
+  normalised device coordinates point up while its framebuffer points down. Passed with `setVertexBytes` /
+  `setFragmentBytes`, no buffer object.
+- **DirectX** (`appendAdjustedUniforms`, shader_windows.go): HLSL constant-buffer packing (nothing straddles
+  a 16-byte row), matrices transposed (HLSL is row-major).
+
+**For Vulkan**: a uniform buffer in **std140** layout (vec3 and arrays padded to 16 bytes, mat3 as three
+padded columns), or push constants where the total fits (128 bytes guaranteed — Ebitengine's preserved
+uniforms alone are 2 + 2·4 + 2 + 2 + 2·4 + 2·4 + 16 = 46 dwords = 184 bytes with four source images, so a
+uniform buffer it is: one per frame, sub-allocated per draw with a dynamic offset). The **Y axis**: Vulkan's
+clip space has Y pointing down, like its framebuffer and unlike OpenGL's — so either negate the projection
+matrix's Y as Metal does, or use a negative viewport height (core since Vulkan 1.1). The first keeps the
+SPIR-V and the viewport plain; to decide in the design.
+
+**Vertices**: a fixed format of 12 floats a vertex (`VertexFloatCount`): destination position (2), source
+texture coordinates (2), colour (4), and four custom floats — one `VkVertexInputBindingDescription` and four
+attributes, the same for every shader. `SetVertices` hands the batch's vertices and indices once; draws refer
+to them by `indexOffset` — so one vertex and one index buffer per frame (host-visible, written once, or
+staged), bound once.
+
 ## Still to read (next ticks)
 
-- How each driver packs the uniforms into `[]uint32` (std140-like alignment? per-driver?), and the vertex
-  layout (Ebitengine's fixed vertex format: position, texture coords, colour, custom attributes).
 - How the opengl and metal drivers organise a frame: vertex / index buffers, uniform layout per shader, image
   ↔ texture handling, the screen image, read-backs.
 - Ebitengine's own discussions of Vulkan (issues on hajimehoshi/ebiten) and the author's stance.
