@@ -34,7 +34,7 @@ line. Rotation: ~/Projects/empty/.idle-loop-next (goloco → gameviber → ebite
   (hajimehoshi/ebiten) has its push URL disabled.
 
 ## Queue (top = next)
-V0. [ ] **Research** (docs/vulkan/RESEARCH.md): the graphicsdriver interface in detail (what metal / directx do
+V0. [x] (DONE 2026-11-05: docs/vulkan/RESEARCH.md §1–10) **Research** (docs/vulkan/RESEARCH.md): the graphicsdriver interface in detail (what metal / directx do
     per method: command batches, FlushMode, ReadPixelsAsync, the screen framebuffer, MaxImageSize, vsync,
     transparency); how internal/ui picks a driver (EBITENGINE_GRAPHICS_LIBRARY) and how the Linux window is made
     (internal/glfw — does it expose glfwCreateWindowSurface / the X11 / Wayland handles for a VkSurfaceKHR?);
@@ -53,11 +53,6 @@ V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop 
 
 ## Questions for Joop
 
-## Notes for the next tick
-- RESEARCH.md §8, Joop 2026-11-05: "the author's main counter against Vulkan is implementation cost, in a time
-  LLMs weren't yet in the picture." — add it: the objection was the cost of writing and keeping a fourth
-  driver, which is exactly what this branch puts to the test.
-
 ## Blocked
 - Testing on this VPS needs lavapipe (Mesa's software Vulkan): `sudo pacman -S vulkan-swrast` (Joop). Until
   then V2's device test can only be written, not run here.
@@ -70,4 +65,5 @@ V6. [ ] goloco and GameViber on it (a replace directive in a local build); Joop 
 - 2026-11-05 (V0 research, part 2 — overnight) — RESEARCH.md §6: the shader IR (types, 10 statement kinds, 15 expression kinds, 56 built-ins) mapped onto SPIR-V: types one to one, structured control flow (selection / loop merges; Kage's fixed for-loop form → one canonical loop shape), locals as Function-storage variables (no SSA needed), the maths through GLSL.std.450, derivatives to OpDPdx / OpDPdy / OpFwidth, mod → OpFMod (GLSL's sign), __texelAt → an explicit-LOD-0 sample; && / || need care (short-circuit). NEXT: part 3 — uniform packing and the vertex layout per driver, the opengl / metal frame organisation, Ebitengine's Vulkan discussions, purego's limits for a struct-heavy C API.
 - 2026-11-05 (V0 research, part 3 — overnight) — RESEARCH.md §7: uniforms arrive packed in IR order with Ebitengine's 7 preserved uniforms first (184 bytes with four sources — too big for guaranteed push constants, so a per-frame uniform buffer with dynamic offsets); how Metal (alignment, padded vec3 / mat3, Y-flipped projection) and DirectX (HLSL packing, transposed matrices) repack; Vulkan: std140 and a decision on Y (negate the projection as Metal, or a negative viewport height); the fixed 12-float vertex format → one binding, four attributes, one vertex + index buffer per frame. NEXT: part 4 — a frame in the metal driver (command buffers, the screen image, read-backs), Ebitengine's Vulkan discussions, purego's limits.
 - 2026-11-05 (V0 research, part 4 — overnight) — RESEARCH.md §8: hajimehoshi/ebiten#389 (open since 2017): the author's expected benefits (speed, restoring, triple buffering), "no concrete plan", "too early … wait and see", Android notes, and (2024) "As we have removed the restorable package, the priority got lower" — no opposition, no plan; the arguments that still hold (GPU where GL falls back to software but Vulkan doesn't, presentation control, Android). §9: purego and Vulkan's struct-heavy API (structs by address, functions through vkGet*ProcAddr after Dlopen of the loader, runtime.Pinner for pNext chains and arrays, NewCallback only for the debug messenger, handle sizes). NEXT: the last research part — a frame in the metal driver (command buffers, the screen image, read-backs) — then DESIGN.md (V1).
+- 2026-11-05 (V0 done — overnight) — RESEARCH.md §8 gains Joop's point (the author's objection was implementation cost, weighed before LLMs — this branch tests whether it still holds); §10: a frame as the Metal driver runs it (one command buffer committed at every End, present on FlushModePresent; an encoder per destination; pooled per-frame vertex / index buffers recycled when the frame is done; the drawable fetched at the first screen draw) and the Vulkan shape of each (submit + fence per End, dynamic rendering per destination with layout barriers, a mapped ring per frame in flight, acquire / present semaphores, copy-to-buffer read-backs). NEXT: V1 — DESIGN.md.
 

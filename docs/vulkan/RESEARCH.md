@@ -144,7 +144,10 @@ I'll wait and see" (2017). Later notes are about Android (Vulkan from API level 
 devices by 2022). Most recently (March 2024): "As we have removed the `restorable` package, the priority got
 lower."
 
-So: no opposition, no plan, and one of the original reasons (restoring) gone. This branch doesn't depend on
+So: no opposition, no plan, and one of the original reasons (restoring) gone. The objection that remains is
+the one stated in 2017 — the implementation cost of another driver. As Joop put it (November 2026), that cost
+was weighed "in a time LLMs weren't yet in the picture"; this branch is, among other things, a test of
+whether it still holds. This branch doesn't depend on
 being taken up; if it ever is, the remaining arguments are the ones that still hold — the GPU on systems
 where OpenGL falls back to software but Vulkan doesn't (Crostini, some VMs and remote desktops), presentation
 control (mailbox / triple buffering), and Android.
@@ -165,7 +168,31 @@ Ebitengine's own OpenGL binding gets its functions. Points to handle:
 - **Handles**: dispatchable ones are pointers, non-dispatchable ones are 64-bit on every 64-bit target —
   `uintptr` / `uint64` both fit; 32-bit targets would need care (Linux / BSD amd64 and arm64 first).
 
+## 10. A frame, as the Metal driver runs it — and its Vulkan shape
+
+(graphics_darwin.go)
+
+- **Commands**: one command buffer, created on demand; `End` of *any* mode commits it
+  (`flushCommandBufferIfNeeded`), `End(FlushModePresent)` also presents the screen. Vulkan: a command buffer
+  per frame in flight, `vkQueueSubmit` at every `End` (with a fence or timeline-semaphore value so the
+  frame's resources can be reclaimed), `vkQueuePresentKHR` on present.
+- **Destinations**: a render command encoder per destination image, closed when the destination changes
+  (`flushRenderCommandEncoderIfNeeded`). Vulkan: a render pass per run of draws to one image — dynamic
+  rendering (core in 1.3) avoids render-pass and framebuffer objects — with the image layout barriers between
+  "drawn into" and "sampled from".
+- **Vertices and indices**: `SetVertices` copies them into buffers taken from a pool of power-of-two sizes
+  (`availableBuffer`), remembered per frame and recycled when that frame is done (`gcBuffers`). Vulkan:
+  the same, host-visible coherent memory mapped once — a ring per frame in flight; the uniform buffer
+  (§7) can share the scheme.
+- **The screen**: the drawable is fetched only when the screen is first drawn in a frame, and given back
+  after presenting. Vulkan: `vkAcquireNextImageKHR` at the first draw to the screen image (an
+  image-available semaphore the submit waits on), present waiting on a render-finished semaphore.
+  `NeedsClearingScreen` is false for Metal; for Vulkan it follows the load operation chosen (clear on load:
+  false).
+- **Read-backs**: a blit into a buffer recorded in the stream, completion polled — Vulkan:
+  `vkCmdCopyImageToBuffer` and the submit's fence (§1).
+
+With that, the research is complete enough for a design.
+
 ## Still to read (next ticks)
 
-- How the opengl and metal drivers organise a frame: vertex / index buffers, uniform layout per shader, image
-  ↔ texture handling, the screen image, read-backs.
