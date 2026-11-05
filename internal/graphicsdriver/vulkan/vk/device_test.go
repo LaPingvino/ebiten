@@ -354,3 +354,174 @@ func TestShaderModuleFromSPIRV(t *testing.T) {
 	}
 	device.DestroyShaderModule(sm)
 }
+
+// shaders is the backend's constant-colour fragment shader and a vertex
+// shader that puts every vertex at one point (a draw that covers nothing).
+func shaders(t *testing.T, device *vk.Device, rgba [4]float32) (vk.ShaderModule, vk.ShaderModule) {
+	t.Helper()
+	frag := spirv.NewModule()
+	frag.Capability(spirv.CapabilityShader)
+	frag.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	vec4 := frag.TypeVector(frag.TypeFloat(32), 4)
+	out := frag.Variable(frag.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	frag.Decorate(out, spirv.DecorationLocation, 0)
+	colour := frag.ConstantComposite(vec4, frag.ConstantFloat32(rgba[0]), frag.ConstantFloat32(rgba[1]), frag.ConstantFloat32(rgba[2]), frag.ConstantFloat32(rgba[3]))
+	void := frag.TypeVoid()
+	fmain := frag.Function(void, frag.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		f.Store(out, colour)
+		f.Return()
+	})
+	frag.EntryPoint(spirv.ExecutionModelFragment, fmain, "main", out)
+	frag.ExecutionMode(fmain, spirv.ExecutionModeOriginUpperLeft)
+
+	vert := spirv.NewModule()
+	vert.Capability(spirv.CapabilityShader)
+	vert.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	vvec4 := vert.TypeVector(vert.TypeFloat(32), 4)
+	pos := vert.Variable(vert.TypePointer(spirv.StorageClassOutput, vvec4), spirv.StorageClassOutput)
+	vert.Decorate(pos, spirv.DecorationBuiltIn, spirv.BuiltInPosition)
+	zero, one := vert.ConstantFloat32(0), vert.ConstantFloat32(1)
+	vvoid := vert.TypeVoid()
+	vmain := vert.Function(vvoid, vert.TypeFunction(vvoid), func(f *spirv.Function) {
+		f.Label()
+		f.Store(pos, vert.ConstantComposite(vvec4, zero, zero, zero, one))
+		f.Return()
+	})
+	vert.EntryPoint(spirv.ExecutionModelVertex, vmain, "main", pos)
+
+	vs, err := device.CreateShaderModule(vert.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := device.CreateShaderModule(frag.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vs, fs
+}
+
+// Dynamic rendering through a graphics pipeline made of the backend's
+// shaders: the attachment cleared by the rendering's load op, the pipeline
+// bound, viewport and scissor set, a draw recorded; the image read back.
+func TestRenderingWithPipeline(t *testing.T) {
+	instance, physical, family := testInstance(t)
+	device, err := vk.CreateDevice(instance, physical, family, &vk.PhysicalDeviceVulkan13Features{Synchronization2: 1, DynamicRendering: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Destroy()
+	queue := device.Queue(family, 0)
+	props := vk.GetPhysicalDeviceMemoryProperties(instance, physical)
+
+	const w, h = 4, 4
+	img, err := device.CreateImage2D(w, h, vk.FormatR8G8B8A8Unorm, vk.ImageUsageColorAttachmentBit|vk.ImageUsageTransferSrcBit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyImage(img)
+	ireq := device.ImageMemoryRequirements(img)
+	ityp, _ := props.FindMemoryType(ireq.MemoryTypeBits, 0)
+	imem, err := device.AllocateMemory(ireq.Size, ityp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.FreeMemory(imem)
+	if err := device.BindImageMemory(img, imem, 0); err != nil {
+		t.Fatal(err)
+	}
+	view, err := device.CreateImageView2D(img, vk.FormatR8G8B8A8Unorm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyImageView(view)
+
+	vs, fs := shaders(t, device, [4]float32{1, 0, 0, 1})
+	defer device.DestroyShaderModule(vs)
+	defer device.DestroyShaderModule(fs)
+	layout, err := device.CreatePipelineLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyPipelineLayout(layout)
+	pipeline, err := device.CreateGraphicsPipeline(layout, vs, fs, vk.FormatR8G8B8A8Unorm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyPipeline(pipeline)
+
+	buf, err := device.CreateBuffer(w*h*4, vk.BufferUsageTransferDstBit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyBuffer(buf)
+	breq := device.BufferMemoryRequirements(buf)
+	btyp, ok := props.FindMemoryType(breq.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+	if !ok {
+		t.Skip("no host-visible, coherent memory")
+	}
+	bmem, err := device.AllocateMemory(breq.Size, btyp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.FreeMemory(bmem)
+	if err := device.BindBufferMemory(buf, bmem, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := device.CreateCommandPool(family, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.DestroyCommandPool(pool)
+	cb, err := device.AllocateCommandBuffer(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := device.BeginCommandBuffer(cb, vk.CommandBufferUsageOneTimeSubmitBit); err != nil {
+		t.Fatal(err)
+	}
+	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+		DstStageMask: vk.PipelineStage2ColorAttachmentOutput, DstAccessMask: vk.Access2ColorAttachmentWrite,
+		OldLayout: vk.ImageLayoutUndefined, NewLayout: vk.ImageLayoutColorAttachmentOptimal,
+		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+		Image: img, SubresourceRange: vk.ColorRange,
+	})
+	area := vk.Rect2D{Extent: vk.Extent2D{Width: w, Height: h}}
+	device.CmdBeginRendering(cb, view, area, [4]float32{0, 0, 1, 1})
+	device.CmdBindGraphicsPipeline(cb, pipeline)
+	device.CmdSetViewport(cb, vk.Viewport{Width: w, Height: h, MaxDepth: 1})
+	device.CmdSetScissor(cb, area)
+	device.CmdDraw(cb, 3, 1, 0, 0)
+	device.CmdEndRendering(cb)
+	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+		SrcStageMask: vk.PipelineStage2ColorAttachmentOutput, SrcAccessMask: vk.Access2ColorAttachmentWrite,
+		DstStageMask: vk.PipelineStage2AllTransfer, DstAccessMask: vk.Access2TransferRead,
+		OldLayout: vk.ImageLayoutColorAttachmentOptimal, NewLayout: vk.ImageLayoutTransferSrcOptimal,
+		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+		Image: img, SubresourceRange: vk.ColorRange,
+	})
+	device.CmdCopyImageToBuffer(cb, img, vk.ImageLayoutTransferSrcOptimal, buf, vk.BufferImageCopy{
+		ImageSubresource: vk.ImageSubresourceLayers{AspectMask: vk.ImageAspectColorBit, LayerCount: 1},
+		ImageExtent:      vk.Extent3D{Width: w, Height: h, Depth: 1},
+	})
+	if err := device.EndCommandBuffer(cb); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.QueueSubmit(queue, cb); err != nil {
+		t.Fatal(err)
+	}
+	if err := device.QueueWaitIdle(queue); err != nil {
+		t.Fatal(err)
+	}
+	px, err := device.MapMemory(bmem, 0, w*h*4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.UnmapMemory(bmem)
+	for i := 0; i < w*h; i++ {
+		if got := [4]byte(px[i*4 : i*4+4]); got != [4]byte{0, 0, 255, 255} {
+			t.Fatalf("pixel %d: %v, want the clear colour 0 0 255 255", i, got)
+		}
+	}
+}

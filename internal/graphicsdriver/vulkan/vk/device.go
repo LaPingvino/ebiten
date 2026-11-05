@@ -28,15 +28,18 @@ import (
 type Device struct {
 	handle uintptr
 	fn     struct {
-		destroyDevice, getDeviceQueue, deviceWaitIdle                              uintptr
-		createBuffer, destroyBuffer, getBufferMemoryRequirements, bindBufferMemory uintptr
-		allocateMemory, freeMemory, mapMemory, unmapMemory                         uintptr
-		createCommandPool, destroyCommandPool, allocateCommandBuffers              uintptr
-		beginCommandBuffer, endCommandBuffer, cmdFillBuffer                        uintptr
-		queueSubmit, queueWaitIdle                                                 uintptr
-		createImage, destroyImage, getImageMemoryRequirements, bindImageMemory     uintptr
-		cmdPipelineBarrier2, cmdClearColorImage, cmdCopyImageToBuffer              uintptr
-		createShaderModule, destroyShaderModule                                    uintptr
+		destroyDevice, getDeviceQueue, deviceWaitIdle                                  uintptr
+		createBuffer, destroyBuffer, getBufferMemoryRequirements, bindBufferMemory     uintptr
+		allocateMemory, freeMemory, mapMemory, unmapMemory                             uintptr
+		createCommandPool, destroyCommandPool, allocateCommandBuffers                  uintptr
+		beginCommandBuffer, endCommandBuffer, cmdFillBuffer                            uintptr
+		queueSubmit, queueWaitIdle                                                     uintptr
+		createImage, destroyImage, getImageMemoryRequirements, bindImageMemory         uintptr
+		cmdPipelineBarrier2, cmdClearColorImage, cmdCopyImageToBuffer                  uintptr
+		createShaderModule, destroyShaderModule                                        uintptr
+		createImageView, destroyImageView, createPipelineLayout, destroyPipelineLayout uintptr
+		createGraphicsPipelines, destroyPipeline, cmdBeginRendering, cmdEndRendering   uintptr
+		cmdBindPipeline, cmdSetViewport, cmdSetScissor, cmdDraw                        uintptr
 	}
 }
 
@@ -78,6 +81,18 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkCmdCopyImageToBuffer", &d.fn.cmdCopyImageToBuffer},
 		{"vkCreateShaderModule", &d.fn.createShaderModule},
 		{"vkDestroyShaderModule", &d.fn.destroyShaderModule},
+		{"vkCreateImageView", &d.fn.createImageView},
+		{"vkDestroyImageView", &d.fn.destroyImageView},
+		{"vkCreatePipelineLayout", &d.fn.createPipelineLayout},
+		{"vkDestroyPipelineLayout", &d.fn.destroyPipelineLayout},
+		{"vkCreateGraphicsPipelines", &d.fn.createGraphicsPipelines},
+		{"vkDestroyPipeline", &d.fn.destroyPipeline},
+		{"vkCmdBeginRendering", &d.fn.cmdBeginRendering},
+		{"vkCmdEndRendering", &d.fn.cmdEndRendering},
+		{"vkCmdBindPipeline", &d.fn.cmdBindPipeline},
+		{"vkCmdSetViewport", &d.fn.cmdSetViewport},
+		{"vkCmdSetScissor", &d.fn.cmdSetScissor},
+		{"vkCmdDraw", &d.fn.cmdDraw},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))
