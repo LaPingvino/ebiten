@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
+	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/spirv"
 )
 
 // testInstance is a Vulkan 1.3 instance and its first device with a
@@ -324,4 +325,32 @@ func TestClearImageAndReadBack(t *testing.T) {
 		}
 	}
 	t.Logf("%d×%d pixels cleared on the device, read back: %v", w, h, px[:4])
+}
+
+// A shader module the SPIR-V backend writes is taken by the driver.
+func TestShaderModuleFromSPIRV(t *testing.T) {
+	instance, physical, family := testInstance(t)
+	device, err := vk.CreateDevice(instance, physical, family, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Destroy()
+	m := spirv.NewModule()
+	m.Capability(spirv.CapabilityShader)
+	m.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	void := m.TypeVoid()
+	main := m.Function(void, m.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		f.Return()
+	})
+	m.EntryPoint(spirv.ExecutionModelFragment, main, "main")
+	m.ExecutionMode(main, spirv.ExecutionModeOriginUpperLeft)
+	sm, err := device.CreateShaderModule(m.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sm == 0 {
+		t.Error("no shader module")
+	}
+	device.DestroyShaderModule(sm)
 }

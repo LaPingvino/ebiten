@@ -36,6 +36,7 @@ type Device struct {
 		queueSubmit, queueWaitIdle                                                 uintptr
 		createImage, destroyImage, getImageMemoryRequirements, bindImageMemory     uintptr
 		cmdPipelineBarrier2, cmdClearColorImage, cmdCopyImageToBuffer              uintptr
+		createShaderModule, destroyShaderModule                                    uintptr
 	}
 }
 
@@ -75,6 +76,8 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkCmdPipelineBarrier2", &d.fn.cmdPipelineBarrier2},
 		{"vkCmdClearColorImage", &d.fn.cmdClearColorImage},
 		{"vkCmdCopyImageToBuffer", &d.fn.cmdCopyImageToBuffer},
+		{"vkCreateShaderModule", &d.fn.createShaderModule},
+		{"vkDestroyShaderModule", &d.fn.destroyShaderModule},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))

@@ -69,6 +69,7 @@ func TestStructsMatchHeader(t *testing.T) {
 		"VkImageMemoryBarrier2":            ImageMemoryBarrier2{},
 		"VkDependencyInfo":                 DependencyInfo{},
 		"VkBufferImageCopy":                BufferImageCopy{},
+		"VkShaderModuleCreateInfo":         ShaderModuleCreateInfo{},
 	} {
 		start := strings.Index(h, "typedef struct "+c+" {")
 		if start < 0 {
@@ -129,6 +130,7 @@ func TestStructureTypesMatchHeader(t *testing.T) {
 		"VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO":                   StructureTypeImageCreateInfo,
 		"VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2":              StructureTypeImageMemoryBarrier2,
 		"VK_STRUCTURE_TYPE_DEPENDENCY_INFO":                     StructureTypeDependencyInfo,
+		"VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO":           StructureTypeShaderModuleCreateInfo,
 	} {
 		m := regexp.MustCompile(`\b` + c + ` = (\d+),`).FindStringSubmatch(h)
 		if m == nil {
