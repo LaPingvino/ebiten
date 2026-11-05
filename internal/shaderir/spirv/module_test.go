@@ -100,3 +100,66 @@ func TestValidationCatchesErrors(t *testing.T) {
 		t.Errorf("spirv-val accepted a broken module:\n%s", out)
 	}
 }
+
+// ConstantColorFragment writes one colour to the colour attachment at
+// Location 0.
+func constantColorFragment(rgba [4]float32) *spirv.Module {
+	m := spirv.NewModule()
+	m.Capability(spirv.CapabilityShader)
+	m.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	f32 := m.TypeFloat(32)
+	vec4 := m.TypeVector(f32, 4)
+	out := m.Variable(m.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	m.Decorate(out, spirv.DecorationLocation, 0)
+	m.Name(out, "fragColor")
+	colour := m.ConstantComposite(vec4, m.ConstantFloat32(rgba[0]), m.ConstantFloat32(rgba[1]), m.ConstantFloat32(rgba[2]), m.ConstantFloat32(rgba[3]))
+	void := m.TypeVoid()
+	main := m.Function(void, m.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		f.Store(out, colour)
+		f.Return()
+	})
+	m.Name(main, "main")
+	m.EntryPoint(spirv.ExecutionModelFragment, main, "main", out)
+	m.ExecutionMode(main, spirv.ExecutionModeOriginUpperLeft)
+	return m
+}
+
+func TestConstantColorFragment(t *testing.T) {
+	validate(t, constantColorFragment([4]float32{1, 0.5, 0, 1}).Bytes())
+}
+
+// A vertex shader writing gl_Position (BuiltIn Position) from a constant.
+func TestPositionVertex(t *testing.T) {
+	m := spirv.NewModule()
+	m.Capability(spirv.CapabilityShader)
+	m.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	f32 := m.TypeFloat(32)
+	vec4 := m.TypeVector(f32, 4)
+	pos := m.Variable(m.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	m.Decorate(pos, spirv.DecorationBuiltIn, spirv.BuiltInPosition)
+	zero, one := m.ConstantFloat32(0), m.ConstantFloat32(1)
+	void := m.TypeVoid()
+	main := m.Function(void, m.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		f.Store(pos, m.ConstantComposite(vec4, zero, zero, zero, one))
+		f.Return()
+	})
+	m.EntryPoint(spirv.ExecutionModelVertex, main, "main", pos)
+	validate(t, m.Bytes())
+}
+
+// Constants and types are written once.
+func TestConstantsOnce(t *testing.T) {
+	m := spirv.NewModule()
+	if a, b := m.ConstantFloat32(0.5), m.ConstantFloat32(0.5); a != b {
+		t.Errorf("0.5 twice: %d, %d", a, b)
+	}
+	if a, b := m.ConstantFloat32(0.5), m.ConstantFloat32(0.25); a == b {
+		t.Error("0.5 and 0.25 share an ID")
+	}
+	f := m.TypeFloat(32)
+	if a, b := m.TypeVector(f, 4), m.TypeVector(f, 4); a != b {
+		t.Errorf("vec4 twice: %d, %d", a, b)
+	}
+}
