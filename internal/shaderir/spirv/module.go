@@ -97,7 +97,10 @@ const (
 	opDecorate               = 71
 	opMemberDecorate         = 72
 	opAccessChain            = 65
+	opVectorTimesMatrix      = 144
 	opMatrixTimesVector      = 145
+	opMatrixTimesMatrix      = 146
+	opMatrixTimesScalar      = 143
 	opTypeFunction           = 33
 	opFunction               = 54
 	opFunctionEnd            = 56
@@ -113,6 +116,11 @@ const (
 	opISub                   = 130
 	opIMul                   = 132
 	opSDiv                   = 135
+	opNot                    = 200
+	opKill                   = 252
+	opSelect                 = 169
+	opVectorExtractDynamic   = 77
+	opSRem                   = 138
 	opFDiv                   = 136
 	opVectorTimesScalar      = 142
 	opFMul                   = 133
@@ -150,6 +158,7 @@ const (
 
 	BuiltInPosition    = 0
 	BuiltInFragCoord   = 15
+	BuiltInFrontFacing = 17
 	BuiltInVertexIndex = 42
 )
 
@@ -415,6 +424,9 @@ func (f *Function) LoopMerge(merge, cont uint32) { inst(&f.m.functions, opLoopMe
 
 // Unreachable ends a block control never reaches.
 func (f *Function) Unreachable() { inst(&f.m.functions, opUnreachable) }
+
+// Kill is OpKill: the fragment discarded — it ends the block.
+func (f *Function) Kill() { inst(&f.m.functions, opKill) }
 
 // Branch ends a block jumping to a label.
 func (f *Function) Branch(to uint32) { inst(&f.m.functions, opBranch, to) }

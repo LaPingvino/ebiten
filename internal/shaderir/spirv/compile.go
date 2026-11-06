@@ -58,7 +58,10 @@ type compiler struct {
 	blockVars map[*shaderir.Block]map[int]variable
 	loops     [][2]uint32    // the enclosing loops' continue and merge labels (innermost last): continue / break
 	textures  map[int]uint32 // texture i's combined image sampler (set 0, binding 1 + i), made on first use
-	texList   []uint32       // the same, in order of use: for the entry point's interface
+	texList   []uint32       // the same, in order of use: for the entry point's interface (with frontFacing)
+	// frontFacing is the fragment stage's gl_FrontFacing (Input, BuiltIn
+	// FrontFacing), made on first use of frontfacing().
+	frontFacing uint32
 }
 
 func newCompiler(p *shaderir.Program) *compiler {
@@ -141,7 +144,10 @@ func (c *compiler) uniformBlock() error {
 	c.m.Decorate(block, DecorationBlock)
 	for i, u := range c.p.Uniforms {
 		c.m.MemberDecorate(block, uint32(i), DecorationOffset, uint32(offsets[i]))
-		if u.Main == shaderir.Mat2 || u.Main == shaderir.Mat3 || u.Main == shaderir.Mat4 {
+		isMat := func(t shaderir.Type) bool {
+			return t.Main == shaderir.Mat2 || t.Main == shaderir.Mat3 || t.Main == shaderir.Mat4
+		}
+		if isMat(u) || u.Main == shaderir.Array && len(u.Sub) == 1 && isMat(u.Sub[0]) { // a matrix, or an array of them: the member carries the layout
 			c.m.MemberDecorate(block, uint32(i), DecorationColMajor)
 			c.m.MemberDecorate(block, uint32(i), DecorationMatrixStride, 16)
 		}
@@ -375,6 +381,9 @@ func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error)
 			}
 			f.Return()
 			return true, nil
+		case shaderir.Discard: // discard: OpKill (core in Vulkan 1.3's SPIR-V; it ends the block)
+			f.Kill()
+			return true, nil
 		case shaderir.ExprStmt: // a call for its effects; the value dropped
 			if _, err := c.expr(f, s.Exprs[0]); err != nil {
 				return false, err
@@ -598,6 +607,24 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			}
 			return value{}, fmt.Errorf("spirv: len of this expression not supported yet")
 		}
+		if callee.BuiltinFunc == shaderir.FrontFacing && len(e.Exprs) == 1 {
+			// frontfacing(): counter-clockwise in Ebitengine's pixel space
+			// is front, as on OpenGL offscreen — the projection and
+			// Vulkan's viewport only scale both axes positively, and the
+			// pipelines keep VK_FRONT_FACE_COUNTER_CLOCKWISE.
+			b := shaderir.Type{Main: shaderir.Bool}
+			bt, _ := c.typ(b)
+			if c.frontFacing == 0 {
+				v, err := c.global(b, StorageClassInput)
+				if err != nil {
+					return value{}, err
+				}
+				c.m.Decorate(v, DecorationBuiltIn, BuiltInFrontFacing)
+				c.frontFacing = v
+				c.texList = append(c.texList, v)
+			}
+			return value{f.Load(bt, c.frontFacing), b}, nil
+		}
 		if (callee.BuiltinFunc == shaderir.FloatF || callee.BuiltinFunc == shaderir.IntF) && len(e.Exprs) == 2 {
 			return c.convert(f, callee.BuiltinFunc, e.Exprs[1])
 		}
@@ -609,6 +636,12 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			t = shaderir.Type{Main: shaderir.Vec3}
 		case shaderir.Vec4F:
 			t = shaderir.Type{Main: shaderir.Vec4}
+		case shaderir.IVec2F:
+			t = shaderir.Type{Main: shaderir.IVec2}
+		case shaderir.IVec3F:
+			t = shaderir.Type{Main: shaderir.IVec3}
+		case shaderir.IVec4F:
+			t = shaderir.Type{Main: shaderir.IVec4}
 		case shaderir.Mat2F, shaderir.Mat3F, shaderir.Mat4F:
 			return c.matrixConstructor(f, callee.BuiltinFunc, e.Exprs[1:])
 		default:
@@ -616,15 +649,43 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		}
 		var parts []uint32
 		n := 0
+		intVec := isIntish(t)
 		for _, a := range e.Exprs[1:] {
-			v, err := c.expr(f, a)
+			var v value
+			var err error
+			if intVec && a.Type == shaderir.NumberExpr { // a bare number: an int constant here
+				var id uint32
+				id, err = c.forConst(shaderir.Type{Main: shaderir.Int}, a.Const)
+				v = value{id, shaderir.Type{Main: shaderir.Int}}
+			} else {
+				v, err = c.expr(f, a)
+			}
 			if err != nil {
 				return value{}, err
+			}
+			// ivecN(floats) and vecN(ints) convert (OpConvertFToS truncates, as Go's int(x)).
+			if intVec && isFloatish(v.typ) {
+				ct := shaderir.Type{Main: shaderir.Int}
+				if k := v.typ.DwordCount(); k > 1 {
+					ct = shaderir.Type{Main: shaderir.IVec2 + shaderir.BasicType(k-2)}
+				}
+				ctt, _ := c.typ(ct)
+				v = value{f.op(opConvertFToS, ctt, v.id), ct}
+			} else if !intVec && isIntish(v.typ) {
+				ct := shaderir.Type{Main: shaderir.Float}
+				if k := v.typ.DwordCount(); k > 1 {
+					ct = shaderir.Type{Main: shaderir.Vec2 + shaderir.BasicType(k-2)}
+				}
+				ctt, _ := c.typ(ct)
+				v = value{f.ConvertSToF(ctt, v.id), ct}
 			}
 			parts = append(parts, v.id)
 			n += max(v.typ.DwordCount(), 1)
 		}
 		st, _ := c.typ(t)
+		if len(parts) == 1 && n == t.DwordCount() { // vecN(v) of an N-vector (converted above if need be): v itself
+			return value{parts[0], t}, nil
+		}
 		if n == 1 { // vecN(x): every component x
 			for len(parts) < t.DwordCount() {
 				parts = append(parts, parts[0])
@@ -646,6 +707,8 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			return value{f.op(opFNegate, t, v.id), v.typ}, nil
 		case e.Op == shaderir.Sub && isIntish(v.typ):
 			return value{f.op(opSNegate, t, v.id), v.typ}, nil
+		case e.Op == shaderir.ComplementOp && isIntish(v.typ): // ^x
+			return value{f.op(opNot, t, v.id), v.typ}, nil
 		case e.Op == shaderir.Add:
 			return v, nil
 		}
@@ -666,18 +729,55 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		if err != nil {
 			return value{}, err
 		}
-		// an untyped number takes the other side's int type (n + 1)
-		if e.Exprs[1].Type == shaderir.NumberExpr && l.typ.Main == shaderir.Int {
-			id, _ := c.forConst(l.typ, e.Exprs[1].Const)
-			r = value{id, l.typ}
-		} else if e.Exprs[0].Type == shaderir.NumberExpr && r.typ.Main == shaderir.Int {
-			id, _ := c.forConst(r.typ, e.Exprs[0].Const)
-			l = value{id, r.typ}
+		// an untyped number next to an int or int vector is an int (n + 1,
+		// v % 3: arithmetic spreads it over the vector)
+		intT := shaderir.Type{Main: shaderir.Int}
+		if e.Exprs[1].Type == shaderir.NumberExpr && isIntish(l.typ) {
+			id, _ := c.forConst(intT, e.Exprs[1].Const)
+			r = value{id, intT}
+		} else if e.Exprs[0].Type == shaderir.NumberExpr && isIntish(r.typ) {
+			id, _ := c.forConst(intT, e.Exprs[0].Const)
+			l = value{id, intT}
 		}
 		if e.Op == shaderir.MatrixMul && l.typ.Main >= shaderir.Mat2 && l.typ.Main <= shaderir.Mat4 && r.typ.Main >= shaderir.Vec2 && r.typ.Main <= shaderir.Vec4 {
 			st, _ := c.typ(r.typ)
 			return value{f.MatrixTimesVector(st, l.id, r.id), r.typ}, nil
 		}
+		isMat := func(t shaderir.Type) bool { return t.Main >= shaderir.Mat2 && t.Main <= shaderir.Mat4 }
+		isVec := func(t shaderir.Type) bool { return t.Main >= shaderir.Vec2 && t.Main <= shaderir.Vec4 }
+		if e.Op == shaderir.MatrixMul && isMat(l.typ) && isMat(r.typ) && l.typ.Main == r.typ.Main { // m * m
+			st, _ := c.typ(l.typ)
+			return value{f.op(opMatrixTimesMatrix, st, l.id, r.id), l.typ}, nil
+		}
+		if e.Op == shaderir.MatrixMul && isVec(l.typ) && isMat(r.typ) { // v * m
+			st, _ := c.typ(l.typ)
+			return value{f.op(opVectorTimesMatrix, st, l.id, r.id), l.typ}, nil
+		}
+		if e.Op == shaderir.Div && isMat(l.typ) && r.typ.Main == shaderir.Float { // m / s: each column divided (GLSL's component-wise /)
+			n := int(l.typ.Main-shaderir.Mat2) + 2
+			colT := shaderir.Type{Main: shaderir.Vec2 + (l.typ.Main - shaderir.Mat2)}
+			ct, _ := c.typ(colT)
+			mt, _ := c.typ(l.typ)
+			parts := make([]uint32, n)
+			for k := range parts {
+				parts[k] = r.id
+			}
+			spread := f.CompositeConstruct(ct, parts...)
+			cols := make([]uint32, n)
+			for k := range cols {
+				cols[k] = f.FDiv(ct, f.CompositeExtract(ct, l.id, uint32(k)), spread)
+			}
+			return value{f.CompositeConstruct(mt, cols...), l.typ}, nil
+		}
+		if (e.Op == shaderir.MatrixMul || e.Op == shaderir.ComponentWiseMul) && (isMat(l.typ) && r.typ.Main == shaderir.Float || l.typ.Main == shaderir.Float && isMat(r.typ)) { // m * s, s * m
+			m, s := l, r
+			if !isMat(m.typ) {
+				m, s = r, l
+			}
+			st, _ := c.typ(m.typ)
+			return value{f.op(opMatrixTimesScalar, st, m.id, s.id), m.typ}, nil
+		}
+
 		if v, ok, err := c.arithmetic(f, e.Op, l, r); ok || err != nil {
 			return v, err
 		}
@@ -769,10 +869,11 @@ func isIntish(t shaderir.Type) bool {
 
 // arithmetic is + − * / on floats / float vectors (one type, or a vector with
 // a scalar on either side — the scalar spread for + − /, VectorTimesScalar
-// for *) and on ints / int vectors of one type. ok false: not one of these.
+// for *) and on ints / int vectors of one type (% too: OpSRem, the sign of
+// the dividend, as Go's and C's %). ok false: not one of these.
 func (c *compiler) arithmetic(f *Function, op shaderir.Op, l, r value) (value, bool, error) {
 	if op != shaderir.Add && op != shaderir.Sub && op != shaderir.ComponentWiseMul && op != shaderir.Div &&
-		!(isIntish(l.typ) && (op == shaderir.And || op == shaderir.Or || op == shaderir.Xor || op == shaderir.LeftShift || op == shaderir.RightShift)) {
+		!(isIntish(l.typ) && (op == shaderir.ModOp || op == shaderir.And || op == shaderir.AndNot || op == shaderir.Or || op == shaderir.Xor || op == shaderir.LeftShift || op == shaderir.RightShift)) {
 		return value{}, false, nil
 	}
 	switch {
@@ -811,11 +912,30 @@ func (c *compiler) arithmetic(f *Function, op shaderir.Op, l, r value) (value, b
 		default:
 			return value{f.FDiv(t, l.id, r.id), l.typ}, true, nil
 		}
-	case isIntish(l.typ) && l.typ.Main == r.typ.Main:
+	case isIntish(l.typ) && isIntish(r.typ) && (l.typ.Main == r.typ.Main || l.typ.Main == shaderir.Int || r.typ.Main == shaderir.Int):
+		if l.typ.Main != r.typ.Main { // an int with an int vector: spread it
+			vec, sc := l, r
+			if vec.typ.Main == shaderir.Int {
+				vec, sc = r, l
+			}
+			vt, _ := c.typ(vec.typ)
+			parts := make([]uint32, vec.typ.DwordCount())
+			for i := range parts {
+				parts[i] = sc.id
+			}
+			spread := value{f.CompositeConstruct(vt, parts...), vec.typ}
+			if l.typ.Main == shaderir.Int {
+				l = spread
+			} else {
+				r = spread
+			}
+		}
 		t, _ := c.typ(l.typ)
 		switch op {
 		case shaderir.And:
 			return value{f.BitwiseAnd(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.AndNot: // &^: l & ^r
+			return value{f.BitwiseAnd(t, l.id, f.op(opNot, t, r.id)), l.typ}, true, nil
 		case shaderir.Or:
 			return value{f.op(opBitwiseOr, t, l.id, r.id), l.typ}, true, nil
 		case shaderir.Xor:
@@ -830,6 +950,8 @@ func (c *compiler) arithmetic(f *Function, op shaderir.Op, l, r value) (value, b
 			return value{f.ISub(t, l.id, r.id), l.typ}, true, nil
 		case shaderir.ComponentWiseMul:
 			return value{f.IMul(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.ModOp:
+			return value{f.op(opSRem, t, l.id, r.id), l.typ}, true, nil
 		default:
 			return value{f.SDiv(t, l.id, r.id), l.typ}, true, nil
 		}
@@ -1238,13 +1360,62 @@ func (c *compiler) index(f *Function, e shaderir.Expr) (value, error) {
 		st, _ := c.typ(et)
 		return value{f.CompositeExtract(st, v.id, uint32(n)), et}, nil
 	}
+	if v.typ.Main >= shaderir.Mat2 && v.typ.Main <= shaderir.Mat4 { // m[i]: a column
+		et := shaderir.Type{Main: shaderir.Vec2 + (v.typ.Main - shaderir.Mat2)}
+		st, _ := c.typ(et)
+		if ix.Type == shaderir.NumberExpr {
+			n, _ := constant.Int64Val(constant.ToInt(ix.Const))
+			return value{f.CompositeExtract(st, v.id, uint32(n)), et}, nil
+		}
+		i, err := c.expr(f, ix) // a dynamic index: the column chosen by selects (no variable — they must open the function)
+		if err != nil {
+			return value{}, err
+		}
+		bt, _ := c.typ(shaderir.Type{Main: shaderir.Bool})
+		n := int(v.typ.Main-shaderir.Mat2) + 2
+		col := f.CompositeExtract(st, v.id, 0)
+		for k := 1; k < n; k++ {
+			is := f.op(opIEqual, bt, i.id, c.m.ConstantInt32(int32(k)))
+			col = f.op(opSelect, st, is, f.CompositeExtract(st, v.id, uint32(k)), col)
+		}
+		return value{col, et}, nil
+	}
+	if (isFloatish(v.typ) || isIntish(v.typ)) && v.typ.DwordCount() > 1 { // v[i], a dynamic index
+		i, err := c.expr(f, ix)
+		if err != nil {
+			return value{}, err
+		}
+		et := shaderir.Type{Main: shaderir.Float}
+		if isIntish(v.typ) {
+			et = shaderir.Type{Main: shaderir.Int}
+		}
+		st, _ := c.typ(et)
+		return value{f.op(opVectorExtractDynamic, st, v.id, i.id), et}, nil
+	}
 	return value{}, fmt.Errorf("spirv: indexing %s not supported yet", v.typ.String())
 }
 
 // comparison is < <= > >= == != on two scalars of one type (floats ordered,
 // != unordered — as glslang writes GLSL's; ints signed), giving a bool.
-// PARTIAL: vector comparisons (VectorEqualOp …).
+// Vectors: == and != (VectorEqualOp / VectorNotEqualOp), all or any.
 func (c *compiler) comparison(f *Function, op shaderir.Op, l, r value) (value, bool) {
+	if (op == shaderir.VectorEqualOp || op == shaderir.VectorNotEqualOp) && l.typ.Main == r.typ.Main && l.typ.DwordCount() > 1 && (isFloatish(l.typ) || isIntish(l.typ)) {
+		// v == w: every component equal (OpAll); v != w: any differs (OpAny).
+		n := uint32(l.typ.DwordCount())
+		bt, _ := c.typ(shaderir.Type{Main: shaderir.Bool})
+		bv := c.m.TypeVector(bt, n)
+		cmp, reduce := uint16(opFOrdEqual), uint16(155)
+		if op == shaderir.VectorNotEqualOp {
+			cmp, reduce = opFUnordNotEqual, 154
+		}
+		if isIntish(l.typ) {
+			cmp = opIEqual
+			if op == shaderir.VectorNotEqualOp {
+				cmp = opINotEqual
+			}
+		}
+		return value{f.op(reduce, bt, f.op(cmp, bv, l.id, r.id)), shaderir.Type{Main: shaderir.Bool}}, true
+	}
 	if l.typ.Main != r.typ.Main || (l.typ.Main != shaderir.Float && l.typ.Main != shaderir.Int && l.typ.Main != shaderir.Bool) {
 		return value{}, false
 	}
@@ -1558,6 +1729,24 @@ func (c *compiler) assignIndex(f *Function, lhs, rhsExpr shaderir.Expr) error {
 			et = shaderir.Type{Main: shaderir.Int}
 		}
 		st, _ := c.typ(et)
+		var idx uint32
+		if ix := lhs.Exprs[1]; ix.Type == shaderir.NumberExpr {
+			n, _ := constant.Int64Val(constant.ToInt(ix.Const))
+			idx = c.m.ConstantInt32(int32(n))
+		} else {
+			i, err := c.expr(f, ix)
+			if err != nil {
+				return err
+			}
+			idx = i.id
+		}
+		ptr = f.AccessChain(c.m.TypePointer(v.storage, st), v.ptr, idx)
+	case v.typ.Main == shaderir.Mat2 || v.typ.Main == shaderir.Mat3 || v.typ.Main == shaderir.Mat4: // m[i] = column
+		et = shaderir.Type{Main: shaderir.Vec2 + (v.typ.Main - shaderir.Mat2)}
+		st, err := c.typ(et)
+		if err != nil {
+			return err
+		}
 		var idx uint32
 		if ix := lhs.Exprs[1]; ix.Type == shaderir.NumberExpr {
 			n, _ := constant.Int64Val(constant.ToInt(ix.Const))
