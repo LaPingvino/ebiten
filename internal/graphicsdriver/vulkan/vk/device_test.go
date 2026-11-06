@@ -485,6 +485,7 @@ type scene struct {
 	vs, fs   vk.ShaderModule
 	layout   *vk.VertexLayout
 	vertices []float32
+	indices  []uint32 // none: a plain draw of count vertices
 	count    uint32
 }
 
@@ -555,6 +556,36 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 		}
 		device.UnmapMemory(vmem)
 	}
+	var ibuf vk.Buffer
+	if len(sc.indices) > 0 {
+		size := uint64(len(sc.indices) * 4)
+		var err error
+		if ibuf, err = device.CreateBuffer(size, vk.BufferUsageIndexBufferBit); err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyBuffer(ibuf)
+		ireq := device.BufferMemoryRequirements(ibuf)
+		ityp, ok := props.FindMemoryType(ireq.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+		if !ok {
+			t.Skip("no host-visible, coherent memory")
+		}
+		imem, err := device.AllocateMemory(ireq.Size, ityp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.FreeMemory(imem)
+		if err := device.BindBufferMemory(ibuf, imem, 0); err != nil {
+			t.Fatal(err)
+		}
+		m, err := device.MapMemory(imem, 0, size)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, x := range sc.indices {
+			binary.LittleEndian.PutUint32(m[i*4:], x)
+		}
+		device.UnmapMemory(imem)
+	}
 	layout, err := device.CreatePipelineLayout()
 	if err != nil {
 		t.Fatal(err)
@@ -611,7 +642,12 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 	if vbuf != 0 {
 		device.CmdBindVertexBuffer(cb, vbuf, 0)
 	}
-	device.CmdDraw(cb, sc.count, 1, 0, 0)
+	if ibuf != 0 {
+		device.CmdBindIndexBuffer(cb, ibuf, 0, vk.IndexTypeUint32)
+		device.CmdDrawIndexed(cb, uint32(len(sc.indices)), 1, 0, 0, 0)
+	} else {
+		device.CmdDraw(cb, sc.count, 1, 0, 0)
+	}
 	device.CmdEndRendering(cb)
 	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
 		SrcStageMask: vk.PipelineStage2ColorAttachmentOutput, SrcAccessMask: vk.Access2ColorAttachmentWrite,
@@ -828,5 +864,25 @@ func spirvVal(t *testing.T, b []byte) {
 	}
 	if out, err := exec.Command(val, "--target-env", "vulkan1.3", p).CombinedOutput(); err != nil {
 		t.Fatalf("spirv-val: %v\n%s", err, out)
+	}
+}
+
+// Indexed drawing: a quad over the whole image from 4 vertices and 6 uint32
+// indices (two triangles sharing an edge, as Ebitengine sends quads), all
+// corners green — every pixel green, none left the clear colour (a gap on
+// the shared diagonal would show).
+func TestIndexedQuad(t *testing.T) {
+	const n = 8
+	px := drawScene(t, n, n, func(device *vk.Device) scene {
+		vs, fs := colourShaders(t, device)
+		v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0} }
+		verts := slices.Concat(v(-1, -1), v(1, -1), v(-1, 1), v(1, 1))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3}}
+	})
+	green := [4]byte{0, 255, 0, 255}
+	for i := 0; i < n*n; i++ {
+		if got := [4]byte(px[i*4 : i*4+4]); got != green {
+			t.Fatalf("pixel %d,%d: %v, want green", i%n, i/n, got)
+		}
 	}
 }

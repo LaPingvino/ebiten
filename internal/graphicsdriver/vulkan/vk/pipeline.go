@@ -436,6 +436,19 @@ func (d *Device) CmdBindVertexBuffer(cb CommandBuffer, b Buffer, offset uint64) 
 	runtime.KeepAlive(&offset)
 }
 
+// IndexTypeUint32: 32-bit indices (what Ebitengine sends).
+const IndexTypeUint32 uint32 = 1
+
+// CmdBindIndexBuffer is vkCmdBindIndexBuffer.
+func (d *Device) CmdBindIndexBuffer(cb CommandBuffer, b Buffer, offset uint64, indexType uint32) {
+	purego.SyscallN(d.fn.cmdBindIndexBuffer, uintptr(cb), uintptr(b), uintptr(offset), uintptr(indexType))
+}
+
+// CmdDrawIndexed is vkCmdDrawIndexed.
+func (d *Device) CmdDrawIndexed(cb CommandBuffer, indexCount, instanceCount, firstIndex uint32, vertexOffset int32, firstInstance uint32) {
+	purego.SyscallN(d.fn.cmdDrawIndexed, uintptr(cb), uintptr(indexCount), uintptr(instanceCount), uintptr(firstIndex), uintptr(vertexOffset), uintptr(firstInstance))
+}
+
 // CmdDraw is vkCmdDraw.
 func (d *Device) CmdDraw(cb CommandBuffer, vertexCount, instanceCount, firstVertex, firstInstance uint32) {
 	purego.SyscallN(d.fn.cmdDraw, uintptr(cb), uintptr(vertexCount), uintptr(instanceCount), uintptr(firstVertex), uintptr(firstInstance))
