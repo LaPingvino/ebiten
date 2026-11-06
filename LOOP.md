@@ -54,10 +54,12 @@ V7. [x] (DONE 2026-11-06: mempool_linbsd.go — 64 MiB blocks per memory type, a
     implementations cap allocations (maxMemoryAllocationCount, often 4096) and each costs. Pool device memory in
     blocks, images bound at offsets (alignment from vkGetImageMemoryRequirements), freed back through `release`.
     Ebitengine's suites with the validation layer stay green; a test that makes more images than one block holds.
-V8. [ ] **Frame times against OpenGL**: a benchmark harness (goloco's title and examples/2048 for N frames, both
+V8. [x] (DONE 2026-11-06: internal/graphicsdriver/vulkan/frametime + frametime.sh — scenes sprites (N small images) and shader (full-screen Kage), vsync off, warm-up, mean / p95 ms per frame, both drivers; lavapipe here is CPU so its numbers mean nothing for GPUs — the real run waits on a GPU box, see Questions) **Frame times against OpenGL**: a benchmark harness (goloco's title and examples/2048 for N frames, both
     drivers) printing ms / frame, so a real-GPU run (Crostini, or any Vulkan box) gives numbers to compare.
 
 ## Questions for Joop
+- (TO TRY, whenever) On a machine with a GPU (Crostini too): `sh internal/graphicsdriver/vulkan/frametime/frametime.sh`
+  on branch vulkan prints OpenGL vs Vulkan ms / frame for two scenes — paste the lines back.
 - (TO TRY, not a gate — Joop 2026-11-06: "Don't wait on anything for me to try") 2026-11-06 — **Try it in Crostini?** goloco and GameViber run on the Vulkan driver here (Xvfb + lavapipe, pixel-identical to
   OpenGL). On your Chromebook it should reach the real GPU through Venus. docs/vulkan/TRY.md has the steps (a -modfile
   build, `EBITENGINE_GRAPHICS_LIBRARY=vulkan`); `vulkaninfo --summary` first shows whether Crostini exposes Vulkan.
@@ -128,4 +130,5 @@ V8. [ ] **Frame times against OpenGL**: a benchmark harness (goloco's title and 
 - 2026-11-06 (more of Ebitengine on Vulkan) — (GameViber waits → here.) text (v1, v2 and its internal packages: chunk, opentypesvg + svgcss + svgrender, textutil), vector, colorm, ebitenutil under EBITENGINE_VULKAN_VALIDATION=1 EBITENGINE_GRAPHICS_LIBRARY=vulkan: 2266 test cases pass, 0 fail, no validation message. Checked they ran on Vulkan: with a bogus library name text/v2, vector, colorm and svgrender fail (they draw); ebitenutil's tests don't draw. No code change. With the ebiten package (209), graphicscommand / atlas / buffered (82) and these, every Ebitengine package that draws passes on the driver. NEXT: nothing left that doesn't wait on a real GPU — V6's Crostini try (Joop). Until then this project's ticks pass to the next project (no speculative work for its own sake), unless a review finds something.
 - 2026-11-06 (queue refreshed, Joop's word) — "Don't wait on anything for me to try": V6 checked off (goloco and GameViber run on Vulkan here, identical to OpenGL; Crostini stays a thing for him to try), V4 marked done as DESIGN.md records it; new work from DESIGN's open list: V7 images suballocated, V8 a frame-time harness. Ticks no longer pass this project by.
 - 2026-11-06 — V7 done: images suballocated from shared blocks (mempool_linbsd.go); TestSpans + TestImagesShareMemory (1 MiB blocks: 10 images over ≥3 blocks, pixels kept, one block left after disposing; validation silent); ebiten, text, vector, colorm, ebitenutil, the driver: all ok on Vulkan.
+- 2026-11-06 — V8 done: the frametime harness (sprites / shader scenes, vsync off, mean + p95, one line per driver) and frametime.sh for both drivers. Smoke run on Xvfb (OpenGL on llvmpipe, Vulkan on lavapipe — both CPU): sprites 3000 × 300 frames 56.8 vs 84.6 ms, shader 64.7 vs 54.5 ms; meaningful numbers need a GPU.
 
