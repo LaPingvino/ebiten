@@ -49,6 +49,29 @@ const (
 	opTypeImage              = 25
 	opTypeSampledImage       = 27
 	opVectorShuffle          = 79
+	opSelectionMerge         = 247
+	opBranch                 = 249
+	opBranchConditional      = 250
+	opPhi                    = 245
+	opLogicalOr              = 166
+	opLogicalAnd             = 167
+	opLogicalNot             = 168
+	opIEqual                 = 170
+	opINotEqual              = 171
+	opSGreaterThan           = 173
+	opSGreaterThanEqual      = 175
+	opSLessThan              = 177
+	opSLessThanEqual         = 179
+	opFOrdEqual              = 180
+	opFUnordNotEqual         = 183
+	opFOrdLessThan           = 184
+	opFOrdGreaterThan        = 186
+	opFOrdLessThanEqual      = 188
+	opFOrdGreaterThanEqual   = 190
+	opFNegate                = 127
+	opSNegate                = 126
+	opConstantTrue           = 41
+	opConstantFalse          = 42
 	opDPdx                   = 207
 	opDPdy                   = 208
 	opFwidth                 = 209
@@ -345,13 +368,51 @@ func (m *Module) Function(ret, fnType uint32, body func(f *Function)) uint32 {
 }
 
 // Function writes a function's body.
-type Function struct{ m *Module }
+type Function struct {
+	m       *Module
+	current uint32 // the label of the block being written
+}
 
 // Label begins a block.
 func (f *Function) Label() uint32 {
 	id := f.m.ID()
-	inst(&f.m.functions, opLabel, id)
+	f.LabelAt(id)
 	return id
+}
+
+// LabelAt begins the block of a label made earlier (by Module.ID: a branch
+// target named before its block is written).
+func (f *Function) LabelAt(id uint32) {
+	inst(&f.m.functions, opLabel, id)
+	f.current = id
+}
+
+// Current is the label of the block being written (for OpPhi).
+func (f *Function) Current() uint32 { return f.current }
+
+// SelectionMerge declares a structured selection's merge block (before its
+// conditional branch).
+func (f *Function) SelectionMerge(merge uint32) { inst(&f.m.functions, opSelectionMerge, merge, 0) }
+
+// Branch ends a block jumping to a label.
+func (f *Function) Branch(to uint32) { inst(&f.m.functions, opBranch, to) }
+
+// BranchConditional ends a block jumping on a bool.
+func (f *Function) BranchConditional(cond, ifTrue, ifFalse uint32) {
+	inst(&f.m.functions, opBranchConditional, cond, ifTrue, ifFalse)
+}
+
+// Phi is a value by the block control came from: pairs of (value, label).
+func (f *Function) Phi(typ uint32, pairs ...uint32) uint32 { return f.op(opPhi, typ, pairs...) }
+
+// ConstantBool is true or false.
+func (m *Module) ConstantBool(v bool) uint32 {
+	b := m.TypeBool()
+	op, k := uint16(opConstantFalse), uint32(0)
+	if v {
+		op, k = opConstantTrue, 1
+	}
+	return m.typeID(key("cb", b, k), func(id uint32) { inst(&m.types, op, b, id) })
 }
 
 // LocalVariable is a Function-storage OpVariable — only at the start of a

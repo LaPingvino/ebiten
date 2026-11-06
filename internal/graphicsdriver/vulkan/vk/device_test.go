@@ -1453,3 +1453,79 @@ func TestKageClampToZeroBuiltin(t *testing.T) {
 		}
 	}
 }
+
+// Control flow from Kage: if / else with returns in both branches, && and
+// || (short-circuit), < and >=, a local declared in an if block — per pixel
+// of a 4×2 target (dst is the pixel centre): row 0 red, red, green, blue;
+// row 1 all blue.
+func TestKageControlFlow(t *testing.T) {
+	const w, h = 4, 2
+	p, err := graphics.CompileShader([]byte(`//kage:unit pixels
+package main
+
+func Fragment(dst vec4, src vec2, color vec4) vec4 {
+	if dst.x < 2 && dst.y < 1 {
+		red := vec4(1, 0, 0, 1)
+		return red
+	}
+	if dst.x >= 3 || dst.y >= 1 {
+		return vec4(0, 0, 1, 1)
+	} else {
+		return vec4(0, 1, 0, 1)
+	}
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vsWords, err := spirv.CompileVertex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsWords, err := spirv.CompileFragment(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spirvVal(t, wordsBytes(fsWords))
+	src := make([]uint32, 46)
+	for i, f := range []float32{2.0 / w, 0, 0, 0, 0, 2.0 / h, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1} {
+		src[30+i] = math.Float32bits(f)
+	}
+	packed, err := spirv.PackStd140(nil, p.Uniforms, src, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uniforms := make([]float32, len(packed))
+	for i, x := range packed {
+		uniforms[i] = math.Float32frombits(x)
+	}
+	px := drawScene(t, w, h, func(device *vk.Device) scene {
+		vs, err := device.CreateShaderModule(vsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := device.CreateShaderModule(fsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0} }
+		verts := slices.Concat(v(0, 0), v(w, 0), v(0, h), v(w, h))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+			uniforms: uniforms, uniformRange: uint64(len(packed) * 4)}
+	})
+	red, green, blue := [4]byte{255, 0, 0, 255}, [4]byte{0, 255, 0, 255}, [4]byte{0, 0, 255, 255}
+	want := [][4]byte{red, red, green, blue, blue, blue, blue, blue}
+	for i, wt := range want {
+		if got := [4]byte(px[i*4 : i*4+4]); got != wt {
+			t.Errorf("pixel %d,%d: %v, want %v", i%w, i/w, got, wt)
+		}
+	}
+}
+
+func wordsBytes(w []uint32) []byte {
+	b := make([]byte, 4*len(w))
+	for i, x := range w {
+		binary.LittleEndian.PutUint32(b[4*i:], x)
+	}
+	return b
+}

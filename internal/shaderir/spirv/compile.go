@@ -192,6 +192,9 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 			}
 			c.vars[na+1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
 		}
+		if bodyErr = c.declareNested(f, block); bodyErr != nil {
+			return
+		}
 		if bodyErr = c.block(f, block); bodyErr != nil {
 			return
 		}
@@ -205,54 +208,146 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 
 // block writes a block's statements; it ends with a Return if they don't.
 func (c *compiler) block(f *Function, b *shaderir.Block) error {
+	ended, err := c.stmts(f, b)
+	if err != nil {
+		return err
+	}
+	if !ended {
+		f.Return()
+	}
+	return nil
+}
+
+// declareNested declares the locals of the blocks nested in b (if / for
+// bodies) — every Function variable must be at the start of the function's
+// first block.
+func (c *compiler) declareNested(f *Function, b *shaderir.Block) error {
+	for _, s := range b.Stmts {
+		for _, bb := range s.Blocks {
+			if bb == nil {
+				continue
+			}
+			for i, t := range bb.LocalVars {
+				st, err := c.typ(t)
+				if err != nil {
+					return err
+				}
+				c.vars[bb.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+			}
+			if err := c.declareNested(f, bb); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// stmts writes a block's statements; ended reports that the block was
+// closed (by a return), so nothing may follow in it.
+func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error) {
 	for _, s := range b.Stmts {
 		switch s.Type {
 		case shaderir.Assign:
 			lhs := s.Exprs[0]
 			if lhs.Type != shaderir.LocalVariable {
-				return fmt.Errorf("spirv: assignment to expression type %d not supported yet", lhs.Type)
+				return false, fmt.Errorf("spirv: assignment to expression type %d not supported yet", lhs.Type)
 			}
 			v, ok := c.vars[lhs.Index]
 			if !ok || v.input {
-				return fmt.Errorf("spirv: assignment to local %d (an attribute or unknown) not supported yet", lhs.Index)
+				return false, fmt.Errorf("spirv: assignment to local %d (an attribute or unknown) not supported yet", lhs.Index)
 			}
 			rhs, err := c.expr(f, s.Exprs[1])
 			if err != nil {
-				return err
+				return false, err
 			}
 			f.Store(v.ptr, rhs.id)
 		case shaderir.Return:
 			if len(s.Exprs) > 0 {
 				v, err := c.expr(f, s.Exprs[0])
 				if err != nil {
-					return err
+					return false, err
 				}
 				if c.inFunc {
 					f.ReturnValue(v.id)
-					return nil
+					return true, nil
 				}
 				if c.result == 0 {
-					return fmt.Errorf("spirv: a returned value outside the fragment function")
+					return false, fmt.Errorf("spirv: a returned value outside the fragment function")
 				}
 				if v.typ.Main != shaderir.Vec4 {
-					return fmt.Errorf("spirv: the fragment function returns %s, not vec4", v.typ.String())
+					return false, fmt.Errorf("spirv: the fragment function returns %s, not vec4", v.typ.String())
 				}
 				f.Store(c.result, v.id)
 			}
 			f.Return()
-			return nil
+			return true, nil
+		case shaderir.BlockStmt:
+			if ended, err := c.stmts(f, s.Blocks[0]); err != nil || ended {
+				return ended, err
+			}
+		case shaderir.If:
+			if ended, err := c.ifStmt(f, s); err != nil || ended {
+				return ended, err
+			}
 		default:
-			return fmt.Errorf("spirv: statement type %d not supported yet", s.Type)
+			return false, fmt.Errorf("spirv: statement type %d not supported yet", s.Type)
 		}
 	}
-	f.Return()
-	return nil
+	return false, nil
+}
+
+// ifStmt is a structured selection: the condition, OpSelectionMerge, the
+// conditional branch; each branch to the merge block unless it returned.
+// ended: both branches returned (the merge block is then unreachable and
+// closed with OpUnreachable… here a Return keeps it simple and valid).
+func (c *compiler) ifStmt(f *Function, s shaderir.Stmt) (bool, error) {
+	cond, err := c.expr(f, s.Exprs[0])
+	if err != nil {
+		return false, err
+	}
+	if cond.typ.Main != shaderir.Bool {
+		return false, fmt.Errorf("spirv: if on a %s", cond.typ.String())
+	}
+	thenL, mergeL := c.m.ID(), c.m.ID()
+	elseL := mergeL
+	if len(s.Blocks) > 1 && s.Blocks[1] != nil {
+		elseL = c.m.ID()
+	}
+	f.SelectionMerge(mergeL)
+	f.BranchConditional(cond.id, thenL, elseL)
+	f.LabelAt(thenL)
+	thenEnded, err := c.stmts(f, s.Blocks[0])
+	if err != nil {
+		return false, err
+	}
+	if !thenEnded {
+		f.Branch(mergeL)
+	}
+	elseEnded := false
+	if elseL != mergeL {
+		f.LabelAt(elseL)
+		if elseEnded, err = c.stmts(f, s.Blocks[1]); err != nil {
+			return false, err
+		}
+		if !elseEnded {
+			f.Branch(mergeL)
+		}
+	}
+	f.LabelAt(mergeL)
+	if thenEnded && elseEnded {
+		f.Return() // the merge block can't be reached; it still needs an end
+		return true, nil
+	}
+	return false, nil
 }
 
 // expr evaluates an expression to a value.
 func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 	switch e.Type {
 	case shaderir.NumberExpr:
+		if e.Const.Kind() == constant.Bool {
+			return value{c.m.ConstantBool(constant.BoolVal(e.Const)), shaderir.Type{Main: shaderir.Bool}}, nil
+		}
 		// A number on its own is a float here (Kage's untyped constants in
 		// float contexts); integer contexts come with their constructs.
 		v, _ := constant.Float32Val(constant.ToFloat(e.Const))
@@ -324,11 +419,31 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			return value{}, fmt.Errorf("spirv: %s with %d components", callee.BuiltinFunc, n)
 		}
 		return value{f.CompositeConstruct(st, parts...), t}, nil // vector constituents may be vectors
+	case shaderir.Unary:
+		v, err := c.expr(f, e.Exprs[0])
+		if err != nil {
+			return value{}, err
+		}
+		t, _ := c.typ(v.typ)
+		switch {
+		case e.Op == shaderir.NotOp && v.typ.Main == shaderir.Bool:
+			return value{f.op(opLogicalNot, t, v.id), v.typ}, nil
+		case e.Op == shaderir.Sub && isFloatish(v.typ):
+			return value{f.op(opFNegate, t, v.id), v.typ}, nil
+		case e.Op == shaderir.Sub && isIntish(v.typ):
+			return value{f.op(opSNegate, t, v.id), v.typ}, nil
+		case e.Op == shaderir.Add:
+			return v, nil
+		}
+		return value{}, fmt.Errorf("spirv: unary operator %d on %s not supported yet", e.Op, v.typ.String())
 	case shaderir.FieldSelector:
 		return c.fieldSelector(f, e)
 	case shaderir.Index:
 		return c.index(f, e)
 	case shaderir.Binary:
+		if e.Op == shaderir.AndAnd || e.Op == shaderir.OrOr {
+			return c.shortCircuit(f, e)
+		}
 		l, err := c.expr(f, e.Exprs[0])
 		if err != nil {
 			return value{}, err
@@ -343,6 +458,9 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		}
 		if v, ok, err := c.arithmetic(f, e.Op, l, r); ok || err != nil {
 			return v, err
+		}
+		if v, ok := c.comparison(f, e.Op, l, r); ok {
+			return v, nil
 		}
 		return value{}, fmt.Errorf("spirv: operator %d on %s and %s not supported yet", e.Op, l.typ.String(), r.typ.String())
 	}
@@ -396,6 +514,9 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 				return
 			}
 			c.vars[1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+		}
+		if bodyErr = c.declareNested(f, block); bodyErr != nil {
+			return
 		}
 		bodyErr = c.block(f, block)
 	})
@@ -580,6 +701,9 @@ func (c *compiler) userFunc(fn *shaderir.Func) error {
 				return
 			}
 			c.vars[fn.Block.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+		}
+		if bodyErr = c.declareNested(f, fn.Block); bodyErr != nil {
+			return
 		}
 		for i := range fn.InParams {
 			f.Store(c.vars[i].ptr, ids[i])
@@ -812,4 +936,64 @@ func (c *compiler) index(f *Function, e shaderir.Expr) (value, error) {
 		return value{f.CompositeExtract(st, v.id, uint32(n)), et}, nil
 	}
 	return value{}, fmt.Errorf("spirv: indexing %s not supported yet", v.typ.String())
+}
+
+// comparison is < <= > >= == != on two scalars of one type (floats ordered,
+// != unordered — as glslang writes GLSL's; ints signed), giving a bool.
+// PARTIAL: vector comparisons (VectorEqualOp …).
+func (c *compiler) comparison(f *Function, op shaderir.Op, l, r value) (value, bool) {
+	if l.typ.Main != r.typ.Main || (l.typ.Main != shaderir.Float && l.typ.Main != shaderir.Int && l.typ.Main != shaderir.Bool) {
+		return value{}, false
+	}
+	float := map[shaderir.Op]uint16{shaderir.LessThanOp: opFOrdLessThan, shaderir.LessThanEqualOp: opFOrdLessThanEqual,
+		shaderir.GreaterThanOp: opFOrdGreaterThan, shaderir.GreaterThanEqualOp: opFOrdGreaterThanEqual,
+		shaderir.EqualOp: opFOrdEqual, shaderir.NotEqualOp: opFUnordNotEqual}
+	integer := map[shaderir.Op]uint16{shaderir.LessThanOp: opSLessThan, shaderir.LessThanEqualOp: opSLessThanEqual,
+		shaderir.GreaterThanOp: opSGreaterThan, shaderir.GreaterThanEqualOp: opSGreaterThanEqual,
+		shaderir.EqualOp: opIEqual, shaderir.NotEqualOp: opINotEqual}
+	table := float
+	if l.typ.Main == shaderir.Int {
+		table = integer
+	}
+	if l.typ.Main == shaderir.Bool {
+		table = map[shaderir.Op]uint16{shaderir.EqualOp: 164, shaderir.NotEqualOp: 165} // OpLogicalEqual / NotEqual
+	}
+	o, ok := table[op]
+	if !ok {
+		return value{}, false
+	}
+	b := shaderir.Type{Main: shaderir.Bool}
+	bt, _ := c.typ(b)
+	return value{f.op(o, bt, l.id, r.id), b}, true
+}
+
+// shortCircuit is && and ||: the right side only when it matters — its own
+// block in a structured selection, the result an OpPhi of the left side's
+// value (skipped) or the right's.
+func (c *compiler) shortCircuit(f *Function, e shaderir.Expr) (value, error) {
+	l, err := c.expr(f, e.Exprs[0])
+	if err != nil {
+		return value{}, err
+	}
+	if l.typ.Main != shaderir.Bool {
+		return value{}, fmt.Errorf("spirv: && / || on %s", l.typ.String())
+	}
+	from := f.Current()
+	rightL, mergeL := c.m.ID(), c.m.ID()
+	f.SelectionMerge(mergeL)
+	if e.Op == shaderir.AndAnd {
+		f.BranchConditional(l.id, rightL, mergeL)
+	} else {
+		f.BranchConditional(l.id, mergeL, rightL)
+	}
+	f.LabelAt(rightL)
+	r, err := c.expr(f, e.Exprs[1])
+	if err != nil {
+		return value{}, err
+	}
+	rightEnd := f.Current() // the right side may have opened blocks of its own
+	f.Branch(mergeL)
+	f.LabelAt(mergeL)
+	bt, _ := c.typ(l.typ)
+	return value{f.Phi(bt, l.id, from, r.id, rightEnd), l.typ}, nil
 }
