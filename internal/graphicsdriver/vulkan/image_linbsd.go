@@ -32,6 +32,7 @@ type Image struct {
 	height int
 	image  vk.Image
 	mem    vk.DeviceMemory
+	view   vk.ImageView // made on first draw
 	layout uint32
 }
 
@@ -72,15 +73,21 @@ func (i *Image) Dispose() {
 	if i.image == 0 {
 		return
 	}
-	g, img, mem := i.g, i.image, i.mem
-	i.image, i.mem = 0, 0
+	g, img, mem, view := i.g, i.image, i.mem, i.view
+	i.image, i.mem, i.view = 0, 0, 0
 	delete(g.images, i.id)
+	free := func() {
+		if view != 0 {
+			g.device.DestroyImageView(view)
+		}
+		g.device.DestroyImage(img)
+		g.device.FreeMemory(mem)
+	}
 	if g.recording {
-		g.afterBatch = append(g.afterBatch, func() { g.device.DestroyImage(img); g.device.FreeMemory(mem) })
+		g.afterBatch = append(g.afterBatch, free)
 		return
 	}
-	g.device.DestroyImage(img)
-	g.device.FreeMemory(mem)
+	free()
 }
 
 // transition records a barrier moving the image to layout, after and before

@@ -226,6 +226,7 @@ func TestConstantsMatchHeader(t *testing.T) {
 		"VK_DYNAMIC_STATE_VIEWPORT":                       uint64(DynamicStateViewport),
 		"VK_DYNAMIC_STATE_SCISSOR":                        uint64(DynamicStateScissor),
 		"VK_ATTACHMENT_LOAD_OP_CLEAR":                     uint64(AttachmentLoadOpClear),
+		"VK_ATTACHMENT_LOAD_OP_LOAD":                      uint64(AttachmentLoadOpLoad),
 		"VK_ATTACHMENT_STORE_OP_STORE":                    uint64(AttachmentStoreOpStore),
 		"VK_SHADER_STAGE_VERTEX_BIT":                      uint64(ShaderStageVertexBit),
 		"VK_SHADER_STAGE_FRAGMENT_BIT":                    uint64(ShaderStageFragmentBit),

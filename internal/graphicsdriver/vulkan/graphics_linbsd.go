@@ -23,10 +23,8 @@ import (
 	"fmt"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/color"
-	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
-	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 )
 
 // debugCallback, when set (the tests), turns on the Khronos validation layer
@@ -36,8 +34,8 @@ var debugCallback func(vk.DebugMessage)
 // Graphics is the driver. PARTIAL (V4, step 1): one command buffer at a
 // time — End submits it and waits for the device (no frames in flight
 // yet); a dedicated allocation per image; layout transitions with
-// all-commands barriers. Drawing (NewShader, DrawTriangles) and the screen
-// (V5) are not here yet.
+// all-commands barriers; new host buffers per batch for vertices, indices
+// and uniforms (a ring later). The screen (V5) is not here yet.
 type Graphics struct {
 	colorSpace color.ColorSpace
 
@@ -59,11 +57,23 @@ type Graphics struct {
 
 	images      map[graphicsdriver.ImageID]*Image
 	nextImageID graphicsdriver.ImageID
+
+	// Drawing (draw_linbsd.go).
+	shaders        map[graphicsdriver.ShaderID]*Shader
+	nextShaderID   graphicsdriver.ShaderID
+	setLayout      vk.DescriptorSetLayout
+	pipelineLayout vk.PipelineLayout
+	sampler        vk.Sampler
+	emptyImage     *Image
+	descPool       vk.DescriptorPool
+	descUsed       int
+	vertexBuf      *hostBuffer
+	indexBuf       *hostBuffer
 }
 
 // NewGraphics makes the driver; Initialize opens the device.
 func NewGraphics(colorSpace color.ColorSpace) (graphicsdriver.Graphics, error) {
-	return &Graphics{colorSpace: colorSpace, images: map[graphicsdriver.ImageID]*Image{}, serial: 1}, nil
+	return &Graphics{colorSpace: colorSpace, images: map[graphicsdriver.ImageID]*Image{}, shaders: map[graphicsdriver.ShaderID]*Shader{}, serial: 1}, nil
 }
 
 // Initialize opens a Vulkan 1.3 instance and the first device with a
@@ -138,6 +148,7 @@ func (g *Graphics) destroy() {
 		for _, img := range g.images {
 			img.Dispose()
 		}
+		g.destroyDrawing()
 		g.runAfterBatch()
 		g.device.DestroyCommandPool(g.pool)
 		g.device.Destroy()
@@ -201,10 +212,6 @@ func (g *Graphics) runAfterBatch() {
 
 func (g *Graphics) SetTransparent(transparent bool) {}
 
-func (g *Graphics) SetVertices(vertices []float32, indices []uint32) error {
-	return errors.New("vulkan: SetVertices not implemented yet")
-}
-
 func (g *Graphics) NewScreenFramebufferImage(width, height int) (graphicsdriver.Image, error) {
 	return nil, errors.New("vulkan: the screen is not implemented yet (V5)")
 }
@@ -214,14 +221,6 @@ func (g *Graphics) SetVsyncEnabled(enabled bool) {}
 func (g *Graphics) NeedsClearingScreen() bool { return true }
 
 func (g *Graphics) MaxImageSize() int { return g.maxImage }
-
-func (g *Graphics) NewShader(program *shaderir.Program) (graphicsdriver.Shader, error) {
-	return nil, errors.New("vulkan: NewShader not implemented yet")
-}
-
-func (g *Graphics) DrawTriangles(dst graphicsdriver.ImageID, srcs [graphics.ShaderSrcImageCount]graphicsdriver.ImageID, shader graphicsdriver.ShaderID, dstRegions []graphicsdriver.DstRegion, indexOffset int, blend graphicsdriver.Blend, uniforms []uint32) error {
-	return errors.New("vulkan: DrawTriangles not implemented yet")
-}
 
 // hostBuffer is a host-visible, coherent buffer, mapped.
 type hostBuffer struct {

@@ -46,6 +46,7 @@ const (
 	PrimitiveTopologyTriangleList     uint32 = 3
 	DynamicStateViewport              uint32 = 0
 	DynamicStateScissor               uint32 = 1
+	AttachmentLoadOpLoad              uint32 = 0
 	AttachmentLoadOpClear             uint32 = 1
 	AttachmentStoreOpStore            uint32 = 0
 	ShaderStageVertexBit              uint32 = 0x1
@@ -340,6 +341,12 @@ func (d *Device) DestroyPipelineLayout(l PipelineLayout) {
 // the shader makes its own positions), triangle lists, filled and not
 // culled, one sample, blending off, viewport and scissor set while recording.
 func (d *Device) CreateGraphicsPipeline(layout PipelineLayout, vertex, fragment ShaderModule, vertices *VertexLayout, colorFormat uint32) (Pipeline, error) {
+	return d.CreateGraphicsPipelineBlend(layout, vertex, fragment, vertices, colorFormat, nil)
+}
+
+// CreateGraphicsPipelineBlend is CreateGraphicsPipeline with the colour
+// attachment's blend state (nil: blending off, all channels written).
+func (d *Device) CreateGraphicsPipelineBlend(layout PipelineLayout, vertex, fragment ShaderModule, vertices *VertexLayout, colorFormat uint32, blendState *PipelineColorBlendAttachmentState) (Pipeline, error) {
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 	pin := func(p any) { pinner.Pin(p) }
@@ -369,6 +376,9 @@ func (d *Device) CreateGraphicsPipeline(layout PipelineLayout, vertex, fragment 
 	raster := &PipelineRasterizationStateCreateInfo{SType: StructureTypePipelineRasterizationStateCreateInfo, LineWidth: 1}
 	multisample := &PipelineMultisampleStateCreateInfo{SType: StructureTypePipelineMultisampleStateCreateInfo, RasterizationSamples: SampleCount1Bit}
 	attachment := &PipelineColorBlendAttachmentState{ColorWriteMask: ColorComponentRGBA}
+	if blendState != nil {
+		*attachment = *blendState
+	}
 	pin(attachment)
 	blend := &PipelineColorBlendStateCreateInfo{SType: StructureTypePipelineColorBlendStateCreateInfo, AttachmentCount: 1, PAttachments: attachment}
 	dynamics := []uint32{DynamicStateViewport, DynamicStateScissor}
@@ -401,11 +411,21 @@ func (d *Device) DestroyPipeline(p Pipeline) {
 // CmdBeginRendering is vkCmdBeginRendering into one colour attachment, its
 // area cleared to clear and kept.
 func (d *Device) CmdBeginRendering(cb CommandBuffer, view ImageView, area Rect2D, clear [4]float32) {
+	d.cmdBeginRendering(cb, view, area, AttachmentLoadOpClear, clear)
+}
+
+// CmdBeginRenderingLoad is vkCmdBeginRendering into one colour attachment
+// whose contents are kept (loaded) and drawn over.
+func (d *Device) CmdBeginRenderingLoad(cb CommandBuffer, view ImageView, area Rect2D) {
+	d.cmdBeginRendering(cb, view, area, AttachmentLoadOpLoad, [4]float32{})
+}
+
+func (d *Device) cmdBeginRendering(cb CommandBuffer, view ImageView, area Rect2D, loadOp uint32, clear [4]float32) {
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 	att := &RenderingAttachmentInfo{
 		SType: StructureTypeRenderingAttachmentInfo, ImageView: view, ImageLayout: ImageLayoutColorAttachmentOptimal,
-		LoadOp: AttachmentLoadOpClear, StoreOp: AttachmentStoreOpStore, ClearValue: clear,
+		LoadOp: loadOp, StoreOp: AttachmentStoreOpStore, ClearValue: clear,
 	}
 	pinner.Pin(att)
 	info := &RenderingInfo{SType: StructureTypeRenderingInfo, RenderArea: area, LayerCount: 1, ColorAttachmentCount: 1, PColorAttachments: att}
