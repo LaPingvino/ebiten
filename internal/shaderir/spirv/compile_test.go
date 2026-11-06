@@ -16,9 +16,13 @@ package spirv_test
 
 import (
 	"encoding/binary"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/builtinshader"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/spirv"
@@ -88,4 +92,44 @@ func TestCompileNearestBuiltin(t *testing.T) {
 		t.Fatal(err)
 	}
 	validate(t, wordsToBytes(fs))
+}
+
+// Every built-in shader Ebitengine draws images with (nearest and linear;
+// unsafe, clamp-to-zero and repeat addressing) compiles, both stages, to
+// modules spirv-val accepts.
+func TestCompileBuiltinShaders(t *testing.T) {
+	for _, filter := range []builtinshader.Filter{builtinshader.FilterNearest, builtinshader.FilterLinear, builtinshader.FilterPixelated} {
+		for _, address := range []builtinshader.Address{builtinshader.AddressUnsafe, builtinshader.AddressClampToZero, builtinshader.AddressRepeat} {
+			p, err := graphics.CompileShader(builtinshader.ShaderSource(filter, address))
+			if err != nil {
+				t.Fatal(err)
+			}
+			vs, err := spirv.CompileVertex(p)
+			if err != nil {
+				t.Fatalf("filter %d address %d, vertex: %v", filter, address, err)
+			}
+			fs, err := spirv.CompileFragment(p)
+			if err != nil {
+				t.Fatalf("filter %d address %d, fragment: %v", filter, address, err)
+			}
+			validateQuiet(t, wordsToBytes(vs))
+			validateQuiet(t, wordsToBytes(fs))
+		}
+	}
+}
+
+// validateQuiet is validate without the disassembly in the log.
+func validateQuiet(t *testing.T, b []byte) {
+	t.Helper()
+	val, err := exec.LookPath("spirv-val")
+	if err != nil {
+		t.Skip("spirv-val is not installed")
+	}
+	f := filepath.Join(t.TempDir(), "m.spv")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(val, "--target-env", "vulkan1.3", f).CombinedOutput(); err != nil {
+		t.Fatalf("spirv-val: %v\n%s", err, out)
+	}
 }

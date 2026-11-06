@@ -49,6 +49,11 @@ const (
 	opTypeImage              = 25
 	opTypeSampledImage       = 27
 	opVectorShuffle          = 79
+	opDPdx                   = 207
+	opDPdy                   = 208
+	opFwidth                 = 209
+	opFMod                   = 141
+	opDot                    = 148
 	opExtInstImport          = 11
 	opExtInst                = 12
 	opImageSampleExplicitLod = 88

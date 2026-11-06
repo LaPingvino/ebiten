@@ -291,6 +291,9 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		if callee.BuiltinFunc == shaderir.TexelAt {
 			return c.texelAt(f, e.Exprs[1:])
 		}
+		if v, ok, err := c.mathBuiltin(f, callee.BuiltinFunc, e.Exprs[1:]); ok || err != nil {
+			return v, err
+		}
 		var t shaderir.Type
 		switch callee.BuiltinFunc {
 		case shaderir.Vec2F:
@@ -321,6 +324,10 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			return value{}, fmt.Errorf("spirv: %s with %d components", callee.BuiltinFunc, n)
 		}
 		return value{f.CompositeConstruct(st, parts...), t}, nil // vector constituents may be vectors
+	case shaderir.FieldSelector:
+		return c.fieldSelector(f, e)
+	case shaderir.Index:
+		return c.index(f, e)
 	case shaderir.Binary:
 		l, err := c.expr(f, e.Exprs[0])
 		if err != nil {
@@ -646,4 +653,163 @@ func (c *compiler) texelAt(f *Function, args []shaderir.Expr) (value, error) {
 	img := f.Load(simg, c.texture(args[0].Index))
 	floored := f.GLSL(vec2, GLSLFloor, pos.id)
 	return value{f.ImageSampleExplicitLod(vt, img, floored, c.m.ConstantFloat32(0)), vec4}, nil
+}
+
+// glslFloat maps the IR's float built-ins onto GLSL.std.450 (each taking and
+// giving floats or float vectors of the first argument's type; Length and
+// Distance give a float).
+var glslFloat = map[shaderir.BuiltinFunc]uint32{
+	shaderir.Radians: 11, shaderir.Degrees: 12, shaderir.Sin: 13, shaderir.Cos: 14, shaderir.Tan: 15,
+	shaderir.Asin: 16, shaderir.Acos: 17, shaderir.Atan: 18, shaderir.Atan2: 25, shaderir.Pow: 26,
+	shaderir.Exp: 27, shaderir.Log: 28, shaderir.Exp2: 29, shaderir.Log2: 30, shaderir.Sqrt: 31,
+	shaderir.Inversesqrt: 32, shaderir.Abs: 4, shaderir.Sign: 6, shaderir.Floor: 8, shaderir.Ceil: 9,
+	shaderir.Fract: 10, shaderir.Min: 37, shaderir.Max: 40, shaderir.Clamp: 43, shaderir.Mix: 46,
+	shaderir.Step: 48, shaderir.Smoothstep: 49, shaderir.Length: 66, shaderir.Distance: 67,
+	shaderir.Cross: 68, shaderir.Normalize: 69, shaderir.Reflect: 71, shaderir.Refract: 72,
+}
+
+// mathBuiltin is a float built-in: GLSL.std.450 (scalars spread to the
+// vector's type where GLSL wants one type: min, max, clamp, mix, step,
+// smoothstep), mod as OpFMod (GLSL's x − y·floor(x / y): the sign of y), dot
+// as OpDot. ok false: not a float built-in. PARTIAL: their integer forms.
+func (c *compiler) mathBuiltin(f *Function, fn shaderir.BuiltinFunc, args []shaderir.Expr) (value, bool, error) {
+	ext, isExt := glslFloat[fn]
+	derivative := map[shaderir.BuiltinFunc]uint16{shaderir.Dfdx: opDPdx, shaderir.Dfdy: opDPdy, shaderir.Fwidth: opFwidth}
+	if op, ok := derivative[fn]; ok { // fragment only: OpDPdx / OpDPdy / OpFwidth on the value's type
+		if len(args) != 1 {
+			return value{}, true, fmt.Errorf("spirv: %s takes one argument", fn)
+		}
+		v, err := c.expr(f, args[0])
+		if err != nil {
+			return value{}, true, err
+		}
+		vt, _ := c.typ(v.typ)
+		return value{f.op(op, vt, v.id), v.typ}, true, nil
+	}
+	if !isExt && fn != shaderir.Mod && fn != shaderir.Dot {
+		return value{}, false, nil
+	}
+	vals := make([]value, len(args))
+	for i, a := range args {
+		v, err := c.expr(f, a)
+		if err != nil {
+			return value{}, true, err
+		}
+		if !isFloatish(v.typ) {
+			return value{}, true, fmt.Errorf("spirv: %s on %s not supported yet", fn, v.typ.String())
+		}
+		vals[i] = v
+	}
+	if len(vals) == 0 {
+		return value{}, true, fmt.Errorf("spirv: %s without arguments", fn)
+	}
+	// the widest argument's type: the others (scalars) spread to it
+	t := vals[0].typ
+	for _, v := range vals[1:] {
+		if v.typ.Main != shaderir.Float {
+			t = v.typ
+		}
+	}
+	tt, _ := c.typ(t)
+	ids := make([]uint32, len(vals))
+	for i, v := range vals {
+		ids[i] = v.id
+		if v.typ.Main == shaderir.Float && t.Main != shaderir.Float && fn != shaderir.Refract {
+			parts := make([]uint32, t.DwordCount())
+			for j := range parts {
+				parts[j] = v.id
+			}
+			ids[i] = f.CompositeConstruct(tt, parts...)
+		}
+	}
+	switch fn {
+	case shaderir.Mod:
+		return value{f.op(opFMod, tt, ids[0], ids[1]), t}, true, nil
+	case shaderir.Dot, shaderir.Length, shaderir.Distance:
+		ft := c.m.TypeFloat(32)
+		float := shaderir.Type{Main: shaderir.Float}
+		if fn == shaderir.Dot {
+			return value{f.op(opDot, ft, ids[0], ids[1]), float}, true, nil
+		}
+		return value{f.GLSL(ft, ext, ids...), float}, true, nil
+	}
+	return value{f.GLSL(tt, ext, ids...), t}, true, nil
+}
+
+// fieldSelector is v.xyzw: one component (CompositeExtract) or several
+// (VectorShuffle) of a vector.
+func (c *compiler) fieldSelector(f *Function, e shaderir.Expr) (value, error) {
+	v, err := c.expr(f, e.Exprs[0])
+	if err != nil {
+		return value{}, err
+	}
+	sw := e.Exprs[1].Swizzling
+	idx := make([]uint32, len(sw))
+	for i, ch := range sw {
+		switch ch {
+		case 'x':
+			idx[i] = 0
+		case 'y':
+			idx[i] = 1
+		case 'z':
+			idx[i] = 2
+		case 'w':
+			idx[i] = 3
+		default:
+			return value{}, fmt.Errorf("spirv: swizzle %q", sw)
+		}
+	}
+	isInt := isIntish(v.typ)
+	scalar := shaderir.Type{Main: shaderir.Float}
+	if isInt {
+		scalar = shaderir.Type{Main: shaderir.Int}
+	}
+	if len(idx) == 1 {
+		st, _ := c.typ(scalar)
+		return value{f.CompositeExtract(st, v.id, idx[0]), scalar}, nil
+	}
+	rt := shaderir.Type{Main: shaderir.Vec2 + shaderir.BasicType(len(idx)-2)}
+	if isInt {
+		rt = shaderir.Type{Main: shaderir.IVec2 + shaderir.BasicType(len(idx)-2)}
+	}
+	st, _ := c.typ(rt)
+	return value{f.VectorShuffle(st, v.id, v.id, idx...), rt}, nil
+}
+
+// index is a[i] for a uniform array (an access chain into the block with the
+// index — constant or not) or a vector (a constant index: CompositeExtract).
+// PARTIAL: local arrays, matrices.
+func (c *compiler) index(f *Function, e shaderir.Expr) (value, error) {
+	base, ix := e.Exprs[0], e.Exprs[1]
+	if base.Type == shaderir.UniformVariable && base.Index < len(c.p.Uniforms) && c.p.Uniforms[base.Index].Main == shaderir.Array {
+		et := c.p.Uniforms[base.Index].Sub[0]
+		st, err := c.typ(et)
+		if err != nil {
+			return value{}, err
+		}
+		i, err := c.expr(f, ix)
+		if err != nil {
+			return value{}, err
+		}
+		if ix.Type == shaderir.NumberExpr { // an int index, not the float a bare number becomes
+			n, _ := constant.Int64Val(constant.ToInt(ix.Const))
+			i = value{c.m.ConstantInt32(int32(n)), shaderir.Type{Main: shaderir.Int}}
+		}
+		ptr := f.AccessChain(c.m.TypePointer(StorageClassUniform, st), c.uniforms, c.m.ConstantInt32(int32(base.Index)), i.id)
+		return value{f.Load(st, ptr), et}, nil
+	}
+	v, err := c.expr(f, base)
+	if err != nil {
+		return value{}, err
+	}
+	if ix.Type == shaderir.NumberExpr && (isFloatish(v.typ) || isIntish(v.typ)) && v.typ.DwordCount() > 1 {
+		n, _ := constant.Int64Val(constant.ToInt(ix.Const))
+		et := shaderir.Type{Main: shaderir.Float}
+		if isIntish(v.typ) {
+			et = shaderir.Type{Main: shaderir.Int}
+		}
+		st, _ := c.typ(et)
+		return value{f.CompositeExtract(st, v.id, uint32(n)), et}, nil
+	}
+	return value{}, fmt.Errorf("spirv: indexing %s not supported yet", v.typ.String())
 }

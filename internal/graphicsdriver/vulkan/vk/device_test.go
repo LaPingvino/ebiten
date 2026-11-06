@@ -28,6 +28,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/builtinshader"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/spirv"
@@ -1380,6 +1381,71 @@ func TestKageNearestBuiltin(t *testing.T) {
 	want := [][4]byte{
 		{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 0, 0}, {0, 0, 0, 0},
 		{0, 0, 255, 255}, {255, 255, 255, 255}, {0, 0, 0, 0}, {0, 0, 0, 0},
+	}
+	for i, wt := range want {
+		if got := [4]byte(px[i*4 : i*4+4]); got != wt {
+			t.Errorf("pixel %d,%d: %v, want %v", i%w, i/w, got, wt)
+		}
+	}
+}
+
+// Ebitengine's clamp-to-zero nearest built-in (imageSrc0At: the source
+// region checked with step(), the uniforms' region arrays indexed) drawing a
+// 2×2 texture whose source region is set to 1×2: only the texture's first
+// column shows; its second column — inside the texture, outside the region —
+// is transparent by the shader's check, as are the target's right two
+// columns.
+func TestKageClampToZeroBuiltin(t *testing.T) {
+	p, err := graphics.CompileShader(builtinshader.ShaderSource(builtinshader.FilterNearest, builtinshader.AddressClampToZero))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vsWords, err := spirv.CompileVertex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsWords, err := spirv.CompileFragment(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const w, h = 4, 2
+	src := make([]uint32, 46)
+	set := func(i int, v ...float32) {
+		for j, f := range v {
+			src[i+j] = math.Float32bits(f)
+		}
+	}
+	set(2, 2, 2)  // __imageSrcTextureSizes[0]
+	set(14, 0, 0) // __imageSrcRegionOrigins[0]
+	set(22, 1, 2) // __imageSrcRegionSizes[0]: one column
+	set(30, 2.0/w, 0, 0, 0, 0, 2.0/h, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1)
+	packed, err := spirv.PackStd140(nil, p.Uniforms, src, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uniforms := make([]float32, len(packed))
+	for i, x := range packed {
+		uniforms[i] = math.Float32frombits(x)
+	}
+	tex := []byte{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}
+	px := drawScene(t, w, h, func(device *vk.Device) scene {
+		vs, err := device.CreateShaderModule(vsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := device.CreateShaderModule(fsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := func(x, y float32) []float32 { return []float32{x, y, x, y, 1, 1, 1, 1, 0, 0, 0, 0} }
+		verts := slices.Concat(v(0, 0), v(w, 0), v(0, h), v(w, h))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+			uniforms: uniforms, uniformRange: uint64(len(packed) * 4), texture: tex, texW: 2, texH: 2}
+	})
+	clear := [4]byte{0, 0, 0, 0}
+	want := [][4]byte{
+		{255, 0, 0, 255}, clear, clear, clear,
+		{0, 0, 255, 255}, clear, clear, clear,
 	}
 	for i, wt := range want {
 		if got := [4]byte(px[i*4 : i*4+4]); got != wt {
