@@ -28,6 +28,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/spirv"
 )
@@ -1032,4 +1033,89 @@ func TestUniformProjection(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The SPIR-V backend's first draw: Ebitengine's built-in vertex function,
+// compiled by spirv.CompileVertex from the IR of a Kage program, with a
+// constant-green fragment; the uniforms are Ebitengine's own []uint32 (the
+// seven preserved ones, the projection a pixels-to-clip ortho at dword 30,
+// y = 0 → NDC −1) packed by spirv.PackStd140. A quad over the top half in
+// pixels (y 0…8) must land in memory rows 0…7 — so Vulkan takes Ebitengine's
+// projection as it is: its NDC y points down like its framebuffer (OpenGL
+// offscreen gives the same rows; Metal and DirectX flip because their NDC
+// points up). With Metal's flip the quad lands upside down — checked too.
+func TestCompiledVertexShader(t *testing.T) {
+	const n = 16
+	p, err := graphics.CompileShader([]byte("//kage:unit pixels\npackage main\nfunc Fragment(dst vec4, src vec2, color vec4) vec4 { return vec4(1, 0, 0, 1) }\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vsWords, err := spirv.CompileVertex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := make([]uint32, 46) // the preserved uniforms' dwords: 2 + 8 + 2 + 2 + 8 + 8 + 16
+	ortho := []float32{2.0 / n, 0, 0, 0, 0, 2.0 / n, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1}
+	for i, f := range ortho {
+		src[30+i] = math.Float32bits(f)
+	}
+	green := [4]byte{0, 255, 0, 255}
+	for _, flip := range []bool{false, true} {
+		flipY := -1
+		if flip {
+			flipY = graphics.ProjectionMatrixUniformVariableIndex
+		}
+		packed, err := spirv.PackStd140(nil, p.Uniforms, src, flipY)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uniforms := make([]float32, len(packed))
+		for i, w := range packed {
+			uniforms[i] = math.Float32frombits(w)
+		}
+		px := drawScene(t, n, n, func(device *vk.Device) scene {
+			vs, err := device.CreateShaderModule(vsWords)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0} }
+			verts := slices.Concat(v(0, 0), v(16, 0), v(0, 8), v(16, 8))
+			return scene{vs: vs, fs: greenFragment(t, device), layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+				uniforms: uniforms, uniformRange: uint64(len(packed) * 4)}
+		})
+		for y := 0; y < n; y++ {
+			for x := 0; x < n; x++ {
+				i := (y*n + x) * 4
+				want := y < n/2 != flip
+				if got := [4]byte(px[i : i+4]); (got == green) != want {
+					t.Fatalf("flip %v: pixel %d,%d: %v (green expected: %v)", flip, x, y, got, want)
+				}
+			}
+		}
+	}
+}
+
+// greenFragment is a fragment shader writing constant green.
+func greenFragment(t *testing.T, device *vk.Device) vk.ShaderModule {
+	t.Helper()
+	frag := spirv.NewModule()
+	frag.Capability(spirv.CapabilityShader)
+	frag.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	vec4 := frag.TypeVector(frag.TypeFloat(32), 4)
+	out := frag.Variable(frag.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	frag.Decorate(out, spirv.DecorationLocation, 0)
+	green := frag.ConstantComposite(vec4, frag.ConstantFloat32(0), frag.ConstantFloat32(1), frag.ConstantFloat32(0), frag.ConstantFloat32(1))
+	void := frag.TypeVoid()
+	fmain := frag.Function(void, frag.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		f.Store(out, green)
+		f.Return()
+	})
+	frag.EntryPoint(spirv.ExecutionModelFragment, fmain, "main", out)
+	frag.ExecutionMode(fmain, spirv.ExecutionModeOriginUpperLeft)
+	fs, err := device.CreateShaderModule(frag.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fs
 }

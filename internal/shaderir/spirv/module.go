@@ -45,6 +45,7 @@ const (
 	opTypeFloat          = 22
 	opTypeVector         = 23
 	opTypeMatrix         = 24
+	opTypeArray          = 28
 	opTypeStruct         = 30
 	opTypePointer        = 32
 	opConstant           = 43
@@ -87,6 +88,7 @@ const (
 
 	DecorationBlock         = 2
 	DecorationColMajor      = 5
+	DecorationArrayStride   = 6
 	DecorationMatrixStride  = 7
 	DecorationBuiltIn       = 11
 	DecorationLocation      = 30
@@ -227,6 +229,15 @@ func (m *Module) TypeMatrix(column, n uint32) uint32 {
 	return m.typeID(key("mat", column, n), func(id uint32) { inst(&m.types, opTypeMatrix, id, column, n) })
 }
 
+// TypeArray is OpTypeArray of n elements (its length an unsigned constant).
+// A new type per call: its ArrayStride decoration is its own.
+func (m *Module) TypeArray(element uint32, n int) uint32 {
+	length := m.ConstantUint32(uint32(n))
+	id := m.ID()
+	inst(&m.types, opTypeArray, id, element, length)
+	return id
+}
+
 // TypeStruct is OpTypeStruct of the members — a new type each call, since
 // its decorations (Block, member offsets) belong to that one.
 func (m *Module) TypeStruct(members ...uint32) uint32 {
@@ -252,6 +263,12 @@ func (m *Module) ConstantInt32(v int32) uint32 {
 	i := m.TypeInt(32, true)
 	bits := uint32(v)
 	return m.typeID(key("ci", i, bits), func(id uint32) { inst(&m.types, opConstant, i, id, bits) })
+}
+
+// ConstantUint32 is a 32-bit unsigned integer constant (written once per value).
+func (m *Module) ConstantUint32(v uint32) uint32 {
+	u := m.TypeInt(32, false)
+	return m.typeID(key("cu", u, v), func(id uint32) { inst(&m.types, opConstant, u, id, v) })
 }
 
 // ConstantComposite is a composite constant (a vector of constants).
@@ -296,6 +313,14 @@ type Function struct{ m *Module }
 func (f *Function) Label() uint32 {
 	id := f.m.ID()
 	inst(&f.m.functions, opLabel, id)
+	return id
+}
+
+// LocalVariable is a Function-storage OpVariable — only at the start of a
+// function's first block, right after its Label.
+func (f *Function) LocalVariable(pointerType uint32) uint32 {
+	id := f.m.ID()
+	inst(&f.m.functions, opVariable, pointerType, id, StorageClassFunction)
 	return id
 }
 

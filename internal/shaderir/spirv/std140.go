@@ -106,9 +106,9 @@ func std140Members(members []shaderir.Type) (offsets []int, size, align int, err
 // type's DwordCount, matrices column-major — to dst in the std140 block
 // layout of Std140Offsets (zero padding between members, matrix columns and
 // array elements at 16-byte strides), the block's whole size. The uniform at
-// flipY (Ebitengine's projection matrix; −1 none) has its second row negated:
-// Vulkan's clip-space Y points down where OpenGL's points up (DESIGN.md, as
-// the Metal driver does).
+// flipY (−1 none) has its second row negated, as Metal and DirectX flip the
+// projection — the Vulkan driver passes −1: its NDC y points down like its
+// framebuffer, so Ebitengine's projection needs no flip (DESIGN.md, "Y axis").
 func PackStd140(dst []uint32, types []shaderir.Type, uniforms []uint32, flipY int) ([]uint32, error) {
 	offsets, size, err := Std140Offsets(types)
 	if err != nil {

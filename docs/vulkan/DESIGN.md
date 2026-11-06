@@ -50,8 +50,12 @@ one binding and four attributes (§7); viewport and scissor are dynamic state.
 and DirectX drivers repack into theirs (§7), bound with a dynamic offset. They are too big for guaranteed
 push-constant space (184 bytes with four sources against 128).
 
-**Y axis**: Vulkan's clip space points down, unlike OpenGL's. The projection matrix's Y is negated while
-packing the uniforms — as the Metal driver does — so viewports and the SPIR-V stay plain.
+**Y axis** (corrected 2026-11-06, found by the first compiled-shader draw): Ebitengine's projection is taken
+**as it is** — no flip. Its NDC y = −1 is pixel row 0; Vulkan's NDC y points down like its framebuffer, so
+NDC −1 is memory row 0, the same rows OpenGL's offscreen textures get (bottom-up storage, NDC up). Metal and
+DirectX flip because their NDC points up over a top-down framebuffer; Vulkan has neither mismatch, for
+offscreen images or the swapchain (row 0 shown at the top). The first plan here — negate Y as Metal does —
+would have drawn every image upside down; TestCompiledVertexShader checks both ways.
 
 **Textures**: each source image is a combined image sampler with nearest filtering and clamp-to-edge
 addressing (Ebitengine samples texels exactly — `__texelAt`); one descriptor set per draw from the frame's
