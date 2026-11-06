@@ -33,7 +33,7 @@ type Image struct {
 	width  int
 	height int
 	image  vk.Image
-	mem    vk.DeviceMemory
+	mem    memAlloc // in a shared block (mempool_linbsd.go) or its own
 	view   vk.ImageView // made on first draw
 	layout uint32
 }
@@ -60,13 +60,13 @@ func (g *Graphics) newImage(width, height int) (*Image, error) {
 			return nil, fmt.Errorf("vulkan: no memory type for a %d×%d image", width, height)
 		}
 	}
-	mem, err := g.device.AllocateMemory(req.Size, typ)
+	mem, err := g.allocImageMemory(req, typ)
 	if err != nil {
 		g.device.DestroyImage(img)
 		return nil, fmt.Errorf("vulkan: %w", err)
 	}
-	if err := g.device.BindImageMemory(img, mem, 0); err != nil {
-		g.device.FreeMemory(mem)
+	if err := g.device.BindImageMemory(img, mem.mem, mem.off); err != nil {
+		g.freeImageMemory(mem)
 		g.device.DestroyImage(img)
 		return nil, fmt.Errorf("vulkan: %w", err)
 	}
@@ -84,14 +84,14 @@ func (i *Image) Dispose() {
 		return
 	}
 	g, img, mem, view := i.g, i.image, i.mem, i.view
-	i.image, i.mem, i.view = 0, 0, 0
+	i.image, i.mem, i.view = 0, memAlloc{}, 0
 	delete(g.images, i.id)
 	free := func() {
 		if view != 0 {
 			g.device.DestroyImageView(view)
 		}
 		g.device.DestroyImage(img)
-		g.device.FreeMemory(mem)
+		g.freeImageMemory(mem)
 	}
 	g.release(free)
 }

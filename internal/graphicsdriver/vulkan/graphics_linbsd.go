@@ -58,6 +58,7 @@ type Graphics struct {
 	afterBatch []func()
 
 	images      map[graphicsdriver.ImageID]*Image
+	memBlocks   map[uint32][]*memBlock // images' shared memory, by memory type (mempool_linbsd.go)
 	nextImageID graphicsdriver.ImageID
 
 	// Presenting (present_linbsd.go).
@@ -196,6 +197,7 @@ func (g *Graphics) destroy() {
 		}
 		g.destroyDrawing()
 		g.runAfterBatch()
+		g.freeMemBlocks()
 		for i := range g.batches {
 			g.device.DestroyFence(g.batches[i].fence)
 			if r := g.batches[i].ring.buf; r != nil {

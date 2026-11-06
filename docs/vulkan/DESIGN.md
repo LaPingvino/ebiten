@@ -135,5 +135,7 @@ its messages on stderr; the driver's own tests turn it on themselves and fail on
 3. The driver, offscreen: images, `WritePixels`, `DrawTriangles`, read-backs — Ebitengine's tests. **Done.**
 4. The screen: surface, swapchain, present, vsync, resize. **Done.**
 5. Device loss: reported and explained (see Decisions — recovering needs saved images Ebitengine doesn't
-   keep). Draws to one destination merged into one pass. Still open: a suballocator for images, and frame
-   times against OpenGL on a real GPU.
+   keep). Draws to one destination merged into one pass. Images share device memory: 64 MiB blocks per
+   memory type, first fit at the image's alignment, freed ranges merged, a block freed once empty (one empty
+   kept), an image over half a block given its own allocation (mempool_linbsd.go). Still open: frame times
+   against OpenGL on a real GPU.
