@@ -44,6 +44,8 @@ const (
 	opTypeInt            = 21
 	opTypeFloat          = 22
 	opTypeVector         = 23
+	opTypeMatrix         = 24
+	opTypeStruct         = 30
 	opTypePointer        = 32
 	opConstant           = 43
 	opConstantComposite  = 44
@@ -51,6 +53,9 @@ const (
 	opLoad               = 61
 	opStore              = 62
 	opDecorate           = 71
+	opMemberDecorate     = 72
+	opAccessChain        = 65
+	opMatrixTimesVector  = 145
 	opTypeFunction       = 33
 	opFunction           = 54
 	opFunctionEnd        = 56
@@ -80,8 +85,14 @@ const (
 	StorageClassOutput   = 3
 	StorageClassFunction = 7
 
-	DecorationBuiltIn  = 11
-	DecorationLocation = 30
+	DecorationBlock         = 2
+	DecorationColMajor      = 5
+	DecorationMatrixStride  = 7
+	DecorationBuiltIn       = 11
+	DecorationLocation      = 30
+	DecorationBinding       = 33
+	DecorationDescriptorSet = 34
+	DecorationOffset        = 35
 
 	BuiltInPosition    = 0
 	BuiltInVertexIndex = 42
@@ -211,6 +222,19 @@ func (m *Module) TypeVector(component, n uint32) uint32 {
 	return m.typeID(key("vec", component, n), func(id uint32) { inst(&m.types, opTypeVector, id, component, n) })
 }
 
+// TypeMatrix is OpTypeMatrix of n column vectors.
+func (m *Module) TypeMatrix(column, n uint32) uint32 {
+	return m.typeID(key("mat", column, n), func(id uint32) { inst(&m.types, opTypeMatrix, id, column, n) })
+}
+
+// TypeStruct is OpTypeStruct of the members — a new type each call, since
+// its decorations (Block, member offsets) belong to that one.
+func (m *Module) TypeStruct(members ...uint32) uint32 {
+	id := m.ID()
+	inst(&m.types, opTypeStruct, append([]uint32{id}, members...)...)
+	return id
+}
+
 // TypePointer is OpTypePointer to a type in a storage class.
 func (m *Module) TypePointer(storage, typ uint32) uint32 {
 	return m.typeID(key("ptr", storage, typ), func(id uint32) { inst(&m.types, opTypePointer, id, storage, typ) })
@@ -248,6 +272,11 @@ func (m *Module) Variable(pointerType, storage uint32) uint32 {
 // Decorate decorates an ID (Location 0, BuiltIn Position …).
 func (m *Module) Decorate(id, decoration uint32, literals ...uint32) {
 	inst(&m.annotations, opDecorate, append([]uint32{id, decoration}, literals...)...)
+}
+
+// MemberDecorate decorates a struct's member (Offset 0, ColMajor …).
+func (m *Module) MemberDecorate(structType, member, decoration uint32, literals ...uint32) {
+	inst(&m.annotations, opMemberDecorate, append([]uint32{structType, member, decoration}, literals...)...)
 }
 
 // Function begins a function of a function type returning ret; body writes
@@ -310,6 +339,17 @@ func (f *Function) CompositeConstruct(typ uint32, parts ...uint32) uint32 {
 // CompositeExtract is one part of a composite (a vector's component).
 func (f *Function) CompositeExtract(typ, composite uint32, indices ...uint32) uint32 {
 	return f.op(opCompositeExtract, typ, append([]uint32{composite}, indices...)...)
+}
+
+// AccessChain is a pointer into a composite (a struct's member: indices are
+// constant IDs).
+func (f *Function) AccessChain(pointerType, base uint32, indices ...uint32) uint32 {
+	return f.op(opAccessChain, pointerType, append([]uint32{base}, indices...)...)
+}
+
+// MatrixTimesVector is matrix × vector (columns-major, as GLSL's m * v).
+func (f *Function) MatrixTimesVector(typ, matrix, vector uint32) uint32 {
+	return f.op(opMatrixTimesVector, typ, matrix, vector)
 }
 
 // Return ends a block, returning nothing.

@@ -315,11 +315,17 @@ func (d *Device) DestroyImageView(v ImageView) {
 
 // CreatePipelineLayout is vkCreatePipelineLayout with no descriptor sets and
 // no push constants.
-func (d *Device) CreatePipelineLayout() (PipelineLayout, error) {
-	info := &PipelineLayoutCreateInfo{SType: StructureTypePipelineLayoutCreateInfo}
+func (d *Device) CreatePipelineLayout(sets ...DescriptorSetLayout) (PipelineLayout, error) {
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	info := &PipelineLayoutCreateInfo{SType: StructureTypePipelineLayoutCreateInfo, SetLayoutCount: uint32(len(sets))}
+	if len(sets) > 0 {
+		pinner.Pin(&sets[0])
+		info.PSetLayouts = uintptr(unsafe.Pointer(&sets[0]))
+	}
+	pinner.Pin(info)
 	var l PipelineLayout
 	r, _, _ := purego.SyscallN(d.fn.createPipelineLayout, d.handle, uintptr(unsafe.Pointer(info)), 0, uintptr(unsafe.Pointer(&l)))
-	runtime.KeepAlive(info)
 	return l, result(r)
 }
 

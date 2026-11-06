@@ -41,6 +41,9 @@ type Device struct {
 		createGraphicsPipelines, destroyPipeline, cmdBeginRendering, cmdEndRendering   uintptr
 		cmdBindPipeline, cmdSetViewport, cmdSetScissor, cmdDraw, cmdBindVertexBuffers  uintptr
 		cmdBindIndexBuffer, cmdDrawIndexed                                             uintptr
+		createDescriptorSetLayout, destroyDescriptorSetLayout                          uintptr
+		createDescriptorPool, destroyDescriptorPool, allocateDescriptorSets            uintptr
+		updateDescriptorSets, cmdBindDescriptorSets                                    uintptr
 	}
 }
 
@@ -97,6 +100,13 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkCmdBindVertexBuffers", &d.fn.cmdBindVertexBuffers},
 		{"vkCmdBindIndexBuffer", &d.fn.cmdBindIndexBuffer},
 		{"vkCmdDrawIndexed", &d.fn.cmdDrawIndexed},
+		{"vkCreateDescriptorSetLayout", &d.fn.createDescriptorSetLayout},
+		{"vkDestroyDescriptorSetLayout", &d.fn.destroyDescriptorSetLayout},
+		{"vkCreateDescriptorPool", &d.fn.createDescriptorPool},
+		{"vkDestroyDescriptorPool", &d.fn.destroyDescriptorPool},
+		{"vkAllocateDescriptorSets", &d.fn.allocateDescriptorSets},
+		{"vkUpdateDescriptorSets", &d.fn.updateDescriptorSets},
+		{"vkCmdBindDescriptorSets", &d.fn.cmdBindDescriptorSets},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))

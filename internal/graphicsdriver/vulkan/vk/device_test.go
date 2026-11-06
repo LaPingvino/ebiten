@@ -486,7 +486,13 @@ type scene struct {
 	layout   *vk.VertexLayout
 	vertices []float32
 	indices  []uint32 // none: a plain draw of count vertices
-	count    uint32
+	// uniforms: a uniform buffer bound as a dynamic uniform buffer (set 0,
+	// binding 0, the vertex stage), uniformRange bytes of it seen at
+	// uniformOffset (the dynamic offset)
+	uniforms      []float32
+	uniformRange  uint64
+	uniformOffset uint32
+	count         uint32
 }
 
 // drawScene renders a scene into a w×h RGBA image cleared blue and reads the
@@ -586,7 +592,54 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 		}
 		device.UnmapMemory(imem)
 	}
-	layout, err := device.CreatePipelineLayout()
+	var setLayouts []vk.DescriptorSetLayout
+	var set vk.DescriptorSet
+	if len(sc.uniforms) > 0 {
+		sl, err := device.CreateDescriptorSetLayout(vk.DescriptorSetLayoutBinding{
+			DescriptorType: vk.DescriptorTypeUniformBufferDynamic, DescriptorCount: 1, StageFlags: vk.ShaderStageVertexBit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyDescriptorSetLayout(sl)
+		setLayouts = append(setLayouts, sl)
+		pool, err := device.CreateDescriptorPool(1, vk.DescriptorPoolSize{Type: vk.DescriptorTypeUniformBufferDynamic, DescriptorCount: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyDescriptorPool(pool)
+		if set, err = device.AllocateDescriptorSet(pool, sl); err != nil {
+			t.Fatal(err)
+		}
+		size := uint64(len(sc.uniforms) * 4)
+		ubuf, err := device.CreateBuffer(size, vk.BufferUsageUniformBufferBit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyBuffer(ubuf)
+		ureq := device.BufferMemoryRequirements(ubuf)
+		utyp, ok := props.FindMemoryType(ureq.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+		if !ok {
+			t.Skip("no host-visible, coherent memory")
+		}
+		umem, err := device.AllocateMemory(ureq.Size, utyp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.FreeMemory(umem)
+		if err := device.BindBufferMemory(ubuf, umem, 0); err != nil {
+			t.Fatal(err)
+		}
+		m, err := device.MapMemory(umem, 0, size)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, f := range sc.uniforms {
+			binary.LittleEndian.PutUint32(m[i*4:], math.Float32bits(f))
+		}
+		device.UnmapMemory(umem)
+		device.WriteUniformBuffer(set, 0, ubuf, 0, sc.uniformRange)
+	}
+	layout, err := device.CreatePipelineLayout(setLayouts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,6 +690,9 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 	area := vk.Rect2D{Extent: vk.Extent2D{Width: w, Height: h}}
 	device.CmdBeginRendering(cb, view, area, [4]float32{0, 0, 1, 1})
 	device.CmdBindGraphicsPipeline(cb, pipeline)
+	if set != 0 {
+		device.CmdBindDescriptorSet(cb, layout, set, sc.uniformOffset)
+	}
 	device.CmdSetViewport(cb, vk.Viewport{Width: float32(w), Height: float32(h), MaxDepth: 1})
 	device.CmdSetScissor(cb, area)
 	if vbuf != 0 {
@@ -883,6 +939,97 @@ func TestIndexedQuad(t *testing.T) {
 	for i := 0; i < n*n; i++ {
 		if got := [4]byte(px[i*4 : i*4+4]); got != green {
 			t.Fatalf("pixel %d,%d: %v, want green", i%n, i/n, got)
+		}
+	}
+}
+
+// projectionShaders: colourShaders' vertex shader with the position through
+// a uniform block — gl_Position = projection * vec4(dst, 0, 1), the block
+// (set 0, binding 0) holding one column-major mat4 at offset 0, std140 — as
+// the driver will send Ebitengine's pixel-to-clip projection; the fragment
+// shader writes the colour.
+func projectionShaders(t *testing.T, device *vk.Device) (vk.ShaderModule, vk.ShaderModule) {
+	t.Helper()
+	vert := spirv.NewModule()
+	vert.Capability(spirv.CapabilityShader)
+	vert.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	f32 := vert.TypeFloat(32)
+	vec2, vec4 := vert.TypeVector(f32, 2), vert.TypeVector(f32, 4)
+	mat4 := vert.TypeMatrix(vec4, 4)
+	block := vert.TypeStruct(mat4)
+	vert.Decorate(block, spirv.DecorationBlock)
+	vert.MemberDecorate(block, 0, spirv.DecorationOffset, 0)
+	vert.MemberDecorate(block, 0, spirv.DecorationColMajor)
+	vert.MemberDecorate(block, 0, spirv.DecorationMatrixStride, 16)
+	uniforms := vert.Variable(vert.TypePointer(spirv.StorageClassUniform, block), spirv.StorageClassUniform)
+	vert.Decorate(uniforms, spirv.DecorationDescriptorSet, 0)
+	vert.Decorate(uniforms, spirv.DecorationBinding, 0)
+	in := func(typ, loc uint32) uint32 {
+		v := vert.Variable(vert.TypePointer(spirv.StorageClassInput, typ), spirv.StorageClassInput)
+		vert.Decorate(v, spirv.DecorationLocation, loc)
+		return v
+	}
+	dst, src, col, custom := in(vec2, 0), in(vec2, 1), in(vec4, 2), in(vec4, 3)
+	pos := vert.Variable(vert.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	vert.Decorate(pos, spirv.DecorationBuiltIn, spirv.BuiltInPosition)
+	vcol := vert.Variable(vert.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	vert.Decorate(vcol, spirv.DecorationLocation, 0)
+	zero, one, member0 := vert.ConstantFloat32(0), vert.ConstantFloat32(1), vert.ConstantInt32(0)
+	matPtr := vert.TypePointer(spirv.StorageClassUniform, mat4)
+	void := vert.TypeVoid()
+	vmain := vert.Function(void, vert.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		d := f.Load(vec2, dst)
+		p := f.CompositeConstruct(vec4, f.CompositeExtract(f32, d, 0), f.CompositeExtract(f32, d, 1), zero, one)
+		proj := f.Load(mat4, f.AccessChain(matPtr, uniforms, member0))
+		f.Store(pos, f.MatrixTimesVector(vec4, proj, p))
+		f.Store(vcol, f.Load(vec4, col))
+		f.Return()
+	})
+	vert.EntryPoint(spirv.ExecutionModelVertex, vmain, "main", dst, src, col, custom, pos, vcol, uniforms) // SPIR-V 1.4+: every global it uses
+	spirvVal(t, vert.Bytes())
+	unused, fs := colourShaders(t, device) // the same fragment shader
+	device.DestroyShaderModule(unused)
+	vs, err := device.CreateShaderModule(vert.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vs, fs
+}
+
+// Uniforms: a quad given in pixels (0..8 × 0..16 of a 16×16 image), placed
+// by a projection matrix from a dynamic uniform buffer holding two matrices
+// 256 bytes apart (the most minUniformBufferOffsetAlignment may be). The
+// dynamic offset picks one: at 0 (pixels → clip) the left half is green; at
+// 256 (the same, 8 pixels to the right) the right half is.
+func TestUniformProjection(t *testing.T) {
+	const n = 16
+	ortho := func(dx float32) []float32 { // column-major: x/8 − 1 + dx/8, y/8 − 1
+		return []float32{2.0 / n, 0, 0, 0, 0, 2.0 / n, 0, 0, 0, 0, 1, 0, -1 + dx*2/n, -1, 0, 1}
+	}
+	uniforms := make([]float32, 128) // 512 bytes: a matrix at 0 and at 256
+	copy(uniforms, ortho(0))
+	copy(uniforms[64:], ortho(8))
+	green := [4]byte{0, 255, 0, 255}
+	for _, c := range []struct {
+		offset    uint32
+		greenLeft bool
+	}{{0, true}, {256, false}} {
+		px := drawScene(t, n, n, func(device *vk.Device) scene {
+			vs, fs := projectionShaders(t, device)
+			v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0} }
+			verts := slices.Concat(v(0, 0), v(8, 0), v(0, 16), v(8, 16))
+			return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+				uniforms: uniforms, uniformRange: 64, uniformOffset: c.offset}
+		})
+		for y := 0; y < n; y++ {
+			for x := 0; x < n; x++ {
+				i := (y*n + x) * 4
+				got := [4]byte(px[i : i+4])
+				if want := (x < n/2) == c.greenLeft; (got == green) != want {
+					t.Fatalf("offset %d: pixel %d,%d %v (green expected: %v)", c.offset, x, y, got, want)
+				}
+			}
 		}
 	}
 }
