@@ -58,11 +58,14 @@ const (
 	PipelineStage2None        uint64 = 0
 	PipelineStage2AllTransfer uint64 = 0x1000
 	PipelineStage2Host        uint64 = 0x4000
+	PipelineStage2AllCommands uint64 = 0x10000
 
 	Access2None          uint64 = 0
 	Access2TransferRead  uint64 = 0x800
 	Access2TransferWrite uint64 = 0x1000
 	Access2HostRead      uint64 = 0x2000
+	Access2MemoryRead    uint64 = 0x8000
+	Access2MemoryWrite   uint64 = 0x10000
 )
 
 // Extent3D is VkExtent3D; Offset3D VkOffset3D.
