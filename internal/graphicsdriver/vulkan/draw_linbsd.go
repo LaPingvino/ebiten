@@ -206,35 +206,68 @@ func (g *Graphics) descriptorSet() (vk.DescriptorSet, error) {
 	return set, nil
 }
 
-// SetVertices copies the batch's vertices and indices into buffers the
-// following draws read (freed after the batch).
+// SetVertices copies the batch's vertices and indices into its ring (the
+// following draws read them there).
 func (g *Graphics) SetVertices(vertices []float32, indices []uint32) error {
 	if len(vertices) == 0 || len(indices) == 0 {
 		return nil
 	}
-	vb, err := g.newHostBuffer(uint64(4*len(vertices)), vk.BufferUsageVertexBufferBit)
+	vb, vo, err := g.ringAlloc(uint64(4*len(vertices)), 4)
 	if err != nil {
 		return err
 	}
-	ib, err := g.newHostBuffer(uint64(4*len(indices)), vk.BufferUsageIndexBufferBit)
+	copy(vb.mapped[vo:], unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), 4*len(vertices)))
+	ib, io, err := g.ringAlloc(uint64(4*len(indices)), 4)
 	if err != nil {
-		g.freeHostBuffer(vb)
 		return err
 	}
-	copy(vb.mapped, unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), 4*len(vertices)))
-	copy(ib.mapped, unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), 4*len(indices)))
-	g.retireBuffers(vb, ib)
-	g.vertexBuf, g.indexBuf = vb, ib
+	copy(ib.mapped[io:], unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), 4*len(indices)))
+	g.vertexBuf, g.vertexOff, g.indexBuf, g.indexOff = vb, vo, ib, io
 	return nil
 }
 
-// retireBuffers frees the buffers after the batch that may use them.
-func (g *Graphics) retireBuffers(bufs ...*hostBuffer) {
-	g.afterBatch = append(g.afterBatch, func() {
-		for _, b := range bufs {
-			g.freeHostBuffer(b)
+// ringStart is a new ring's size; ringUniformAlign the uniform blocks'
+// offset alignment (minUniformBufferOffsetAlignment is at most 256).
+const (
+	ringStart        = 1 << 20
+	ringUniformAlign = 256
+)
+
+// ring is a batch's host-visible buffer its vertices, indices and uniforms
+// are suballocated from, emptied when the batch is recorded anew.
+type ring struct {
+	buf *hostBuffer
+	off uint64
+}
+
+// ringAlloc is size bytes (at an offset aligned to align) in the recording
+// batch's ring — a bigger one when it is full, the old one freed after the
+// batch (its earlier contents are still read by it).
+func (g *Graphics) ringAlloc(size, align uint64) (*hostBuffer, uint64, error) {
+	if _, err := g.commandBuffer(); err != nil { // the batch's slot free to write
+		return nil, 0, err
+	}
+	r := &g.batches[g.cur].ring
+	off := (r.off + align - 1) &^ (align - 1)
+	if r.buf == nil || off+size > uint64(len(r.buf.mapped)) {
+		n := uint64(ringStart)
+		if r.buf != nil {
+			n = 2 * uint64(len(r.buf.mapped))
 		}
-	})
+		for n < size {
+			n *= 2
+		}
+		nb, err := g.newHostBuffer(n, vk.BufferUsageVertexBufferBit|vk.BufferUsageIndexBufferBit|vk.BufferUsageUniformBufferBit)
+		if err != nil {
+			return nil, 0, err
+		}
+		if old := r.buf; old != nil {
+			g.afterBatch = append(g.afterBatch, func() { g.freeHostBuffer(old) })
+		}
+		r.buf, off = nb, 0
+	}
+	r.off = off + size
+	return r.buf, off, nil
 }
 
 func (i *Image) bounds() image.Rectangle { return image.Rect(0, 0, i.width, i.height) }
@@ -274,12 +307,11 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 	if len(packed) < 4 {
 		packed = append(packed, make([]uint32, 4-len(packed))...)
 	}
-	ub, err := g.newHostBuffer(uint64(4*len(packed)), vk.BufferUsageUniformBufferBit)
+	ub, uo, err := g.ringAlloc(uint64(4*len(packed)), ringUniformAlign)
 	if err != nil {
 		return err
 	}
-	g.retireBuffers(ub)
-	copy(ub.mapped, unsafe.Slice((*byte)(unsafe.Pointer(&packed[0])), 4*len(packed)))
+	copy(ub.mapped[uo:], unsafe.Slice((*byte)(unsafe.Pointer(&packed[0])), 4*len(packed)))
 
 	cb, err := g.commandBuffer()
 	if err != nil {
@@ -289,7 +321,7 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 	if err != nil {
 		return err
 	}
-	g.device.WriteUniformBuffer(set, 0, ub.buf, 0, uint64(4*len(packed)))
+	g.device.WriteUniformBuffer(set, 0, ub.buf, uo, uint64(4*len(packed)))
 	for k, id := range srcIDs {
 		src := g.images[id]
 		if src == nil {
@@ -322,8 +354,8 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 	g.device.CmdBeginRenderingLoad(cb, view, full)
 	g.device.CmdBindGraphicsPipeline(cb, pipeline)
 	g.device.CmdSetViewport(cb, vk.Viewport{Width: float32(dst.width), Height: float32(dst.height), MaxDepth: 1})
-	g.device.CmdBindVertexBuffer(cb, g.vertexBuf.buf, 0)
-	g.device.CmdBindIndexBuffer(cb, g.indexBuf.buf, 0, vk.IndexTypeUint32)
+	g.device.CmdBindVertexBuffer(cb, g.vertexBuf.buf, g.vertexOff)
+	g.device.CmdBindIndexBuffer(cb, g.indexBuf.buf, g.indexOff, vk.IndexTypeUint32)
 	g.device.CmdBindDescriptorSet(cb, g.pipelineLayout, set, 0)
 	for _, r := range dstRegions {
 		rg := r.Region.Intersect(dst.bounds())

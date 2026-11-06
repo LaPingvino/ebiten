@@ -35,8 +35,8 @@ var debugCallback func(vk.DebugMessage)
 // Graphics is the driver: up to framesInFlight batches on the device while
 // the next is recorded (End submits without waiting). PARTIAL: a dedicated
 // allocation per image; layout transitions with
-// all-commands barriers; new host buffers per batch for vertices, indices
-// and uniforms (a ring later). The screen (V5) is not here yet.
+// all-commands barriers. Vertices, indices and uniforms go into a ring per
+// batch (draw_linbsd.go). The screen (V5) is not here yet.
 type Graphics struct {
 	colorSpace color.ColorSpace
 
@@ -69,8 +69,10 @@ type Graphics struct {
 	emptyImage     *Image
 	descPool       vk.DescriptorPool
 	descUsed       int
-	vertexBuf      *hostBuffer
+	vertexBuf      *hostBuffer // where SetVertices put them: the batch's ring
+	vertexOff      uint64
 	indexBuf       *hostBuffer
+	indexOff       uint64
 }
 
 // NewGraphics makes the driver; Initialize opens the device.
@@ -156,16 +158,21 @@ func (g *Graphics) Initialize() error {
 // destroy releases everything (the tests; a game keeps its driver).
 func (g *Graphics) destroy() {
 	if g.device != nil {
+		// The device finishes every batch first: nothing may be destroyed
+		// while a submitted batch can still use it.
 		_ = g.flush()
+		_ = g.device.WaitIdle()
+		g.retireUpTo(g.serial, true)
 		for _, img := range g.images {
 			img.Dispose()
 		}
 		g.destroyDrawing()
-		_ = g.device.WaitIdle()
-		g.retireUpTo(g.serial, true)
 		g.runAfterBatch()
 		for i := range g.batches {
 			g.device.DestroyFence(g.batches[i].fence)
+			if r := g.batches[i].ring.buf; r != nil {
+				g.freeHostBuffer(r)
+			}
 		}
 		g.device.DestroyCommandPool(g.pool)
 		g.device.Destroy()
@@ -199,6 +206,7 @@ type batch struct {
 	serial   uint64
 	after    []func()
 	inFlight bool
+	ring     ring // its vertices, indices and uniforms
 }
 
 // commandBuffer is the command buffer being recorded, begun if none is —
@@ -212,6 +220,7 @@ func (g *Graphics) commandBuffer() (vk.CommandBuffer, error) {
 				return 0, err
 			}
 		}
+		b.ring.off = 0 // the device is done with what the batch last held
 		if err := g.device.ResetFence(b.fence); err != nil {
 			return 0, fmt.Errorf("vulkan: %w", err)
 		}

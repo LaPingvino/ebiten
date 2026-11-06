@@ -217,3 +217,54 @@ func TestWritePixelsBetweenDraws(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// BenchmarkDrawBatch: one batch as a game frame makes it — SetVertices, 200
+// draws of Ebitengine's copy shader (each its own uniforms), End.
+func BenchmarkDrawBatch(b *testing.B) {
+	gd, err := NewGraphics(0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	g := gd.(*Graphics)
+	if err := g.Initialize(); err != nil {
+		b.Skip(err)
+	}
+	defer g.destroy()
+	p, err := graphics.CompileShader(builtinshader.ShaderSource(builtinshader.FilterNearest, builtinshader.AddressUnsafe))
+	if err != nil {
+		b.Fatal(err)
+	}
+	s, _ := g.NewShader(p)
+	src, _ := g.NewImage(16, 16)
+	dst, _ := g.NewImage(256, 256)
+	_ = src.WritePixels([]graphicsdriver.PixelsArgs{{Pixels: make([]byte, 16*16*4), Region: image.Rect(0, 0, 16, 16)}})
+	const draws = 200
+	var vs []float32
+	var is []uint32
+	for k := 0; k < draws; k++ {
+		x := float32(k % 16 * 16)
+		y := float32(k / 16 * 16)
+		q, qi := quad(x, y, x+16, y+16)
+		vs = append(vs, q...)
+		for _, i := range qi {
+			is = append(is, i+uint32(4*k))
+		}
+	}
+	var srcs [graphics.ShaderSrcImageCount]graphicsdriver.ImageID
+	srcs[0] = src.ID()
+	u := preserved(256, 256, image.Rect(0, 0, 16, 16), 16, 16)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := g.SetVertices(vs, is); err != nil {
+			b.Fatal(err)
+		}
+		for k := 0; k < draws; k++ {
+			if err := g.DrawTriangles(dst.ID(), srcs, s.ID(), []graphicsdriver.DstRegion{{Region: image.Rect(0, 0, 256, 256), IndexCount: 6}}, 6*k, graphicsdriver.BlendSourceOver, u); err != nil {
+				b.Fatal(err)
+			}
+		}
+		if err := g.End(graphicsdriver.FlushModeIntermediate); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
