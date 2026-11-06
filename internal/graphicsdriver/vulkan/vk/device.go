@@ -27,7 +27,13 @@ import (
 // without the loader's dispatch or a lookup per call.
 type Device struct {
 	handle uintptr
-	fn     struct {
+	get    uintptr // vkGetDeviceProcAddr: the optional (extension) functions, loaded on use
+	ext    struct {
+		loaded                                                                  bool
+		createSwapchain, destroySwapchain, getSwapchainImages, acquireNextImage uintptr
+		queuePresent, createSemaphore, destroySemaphore                         uintptr
+	}
+	fn struct {
 		destroyDevice, getDeviceQueue, deviceWaitIdle                                  uintptr
 		createBuffer, destroyBuffer, getBufferMemoryRequirements, bindBufferMemory     uintptr
 		allocateMemory, freeMemory, mapMemory, unmapMemory                             uintptr
@@ -54,7 +60,7 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 	if get == 0 {
 		return nil, fmt.Errorf("vk: vkGetDeviceProcAddr is not available")
 	}
-	d := &Device{handle: handle}
+	d := &Device{handle: handle, get: get}
 	for _, f := range []struct {
 		name string
 		p    *uintptr
