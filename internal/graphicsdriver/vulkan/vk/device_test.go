@@ -1725,3 +1725,38 @@ func Fragment(dst vec4, src vec2, color vec4) vec4 {
 		}
 	}
 }
+
+// Kage's declarations zero their variables (as Go's), every time: a
+// function's uninitialized local reads 0, and a loop body's is zeroed on
+// each iteration — s counts to 3 (6 if the body's x carried over), so every
+// pixel is (0, 0.75, 0, 1).
+func TestKageZeroedLocals(t *testing.T) {
+	p, err := graphics.CompileShader([]byte(`//kage:unit pixels
+package main
+
+func Fragment(dst vec4, src vec2, color vec4) vec4 {
+	var r float
+	s := 0.0
+	for i := 0; i < 3; i++ {
+		var x float
+		x += 1
+		s += x
+	}
+	return vec4(r, s/4, 0, 1)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	px := drawKage(t, p, 2, 1)
+	want := [4]int{0, 191, 0, 255}
+	for i := 0; i < 2; i++ {
+		got := px[i*4 : i*4+4]
+		for k := range want {
+			if d := int(got[k]) - want[k]; d < -1 || d > 1 {
+				t.Errorf("pixel %d: %v, want ≈ %v", i, got, want)
+				break
+			}
+		}
+	}
+}

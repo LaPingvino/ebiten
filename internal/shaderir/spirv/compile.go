@@ -62,6 +62,11 @@ type compiler struct {
 	// frontFacing is the fragment stage's gl_FrontFacing (Input, BuiltIn
 	// FrontFacing), made on first use of frontfacing().
 	frontFacing uint32
+	// zeroes are each block's own variables (pointer, type), set to zero
+	// each time the block is entered — Kage's (Go's) declarations zero
+	// them, a loop body's on every iteration; the variables themselves are
+	// all declared at the function's start.
+	zeroes map[*shaderir.Block][][2]uint32
 }
 
 func newCompiler(p *shaderir.Program) *compiler {
@@ -220,7 +225,9 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 				bodyErr = err
 				return
 			}
-			c.vars[na+1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+			ptr := f.LocalVariable(c.m.TypePointer(StorageClassFunction, st))
+			c.zeroOnEntry(block, ptr, st)
+			c.vars[na+1+nv+i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
 		}
 		if bodyErr = c.declareNested(f, block); bodyErr != nil {
 			return
@@ -283,7 +290,9 @@ func (c *compiler) declareNested(f *Function, b *shaderir.Block) error {
 				if c.blockVars[bb] == nil {
 					c.blockVars[bb] = map[int]variable{}
 				}
-				c.blockVars[bb][bb.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+				ptr := f.LocalVariable(c.m.TypePointer(StorageClassFunction, st))
+				c.zeroOnEntry(bb, ptr, st)
+				c.blockVars[bb][bb.LocalVarIndexOffset+i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
 			}
 			if err := c.declareNested(f, bb); err != nil {
 				return err
@@ -296,6 +305,9 @@ func (c *compiler) declareNested(f *Function, b *shaderir.Block) error {
 // stmts writes a block's statements; ended reports that the block was
 // closed (by a return), so nothing may follow in it.
 func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error) {
+	for _, z := range c.zeroes[b] { // the block's declarations: zero on entry
+		f.Store(z[0], c.m.ConstantNull(z[1]))
+	}
 	if own := c.blockVars[b]; len(own) > 0 { // this block's variables over the outer ones of the same index
 		saved := map[int]variable{}
 		absent := map[int]bool{}
@@ -841,7 +853,9 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 				bodyErr = err
 				return
 			}
-			c.vars[1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+			ptr := f.LocalVariable(c.m.TypePointer(StorageClassFunction, st))
+			c.zeroOnEntry(block, ptr, st)
+			c.vars[1+nv+i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
 		}
 		if bodyErr = c.declareNested(f, block); bodyErr != nil {
 			return
@@ -1077,7 +1091,9 @@ func (c *compiler) userFunc(fn *shaderir.Func) error {
 				bodyErr = err
 				return
 			}
-			c.vars[fn.Block.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+			ptr := f.LocalVariable(c.m.TypePointer(StorageClassFunction, st))
+			c.zeroOnEntry(fn.Block, ptr, st)
+			c.vars[fn.Block.LocalVarIndexOffset+i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
 		}
 		if bodyErr = c.declareNested(f, fn.Block); bodyErr != nil {
 			return
@@ -1232,7 +1248,7 @@ func (c *compiler) mathBuiltin(f *Function, fn shaderir.BuiltinFunc, args []shad
 				ids[i], _ = c.forConst(shaderir.Type{Main: shaderir.Int}, args[i].Const)
 			}
 		}
-		return value{f.GLSL(tt, e, ids...), t}, true, nil
+		return value{glslFold(f, fn, tt, e, ids), t}, true, nil
 	}
 	for _, v := range vals {
 		if !isFloatish(v.typ) {
@@ -1272,7 +1288,21 @@ func (c *compiler) mathBuiltin(f *Function, fn shaderir.BuiltinFunc, args []shad
 		}
 		return value{f.GLSL(ft, ext, ids...), float}, true, nil
 	}
-	return value{f.GLSL(tt, ext, ids...), t}, true, nil
+	return value{glslFold(f, fn, tt, ext, ids), t}, true, nil
+}
+
+// glslFold is the GLSL.std.450 instruction e on the arguments — min and
+// max, variadic in Kage but two-operand there, folded left: min(a, b, c) is
+// min(min(a, b), c).
+func glslFold(f *Function, fn shaderir.BuiltinFunc, typ, e uint32, ids []uint32) uint32 {
+	if (fn != shaderir.Min && fn != shaderir.Max) || len(ids) <= 2 {
+		return f.GLSL(typ, e, ids...)
+	}
+	r := f.GLSL(typ, e, ids[0], ids[1])
+	for _, id := range ids[2:] {
+		r = f.GLSL(typ, e, r, id)
+	}
+	return r
 }
 
 // fieldSelector is v.xyzw: one component (CompositeExtract) or several
@@ -1333,6 +1363,11 @@ func (c *compiler) index(f *Function, e shaderir.Expr) (value, error) {
 		if ix.Type == shaderir.NumberExpr { // an int index, not the float a bare number becomes
 			n, _ := constant.Int64Val(constant.ToInt(ix.Const))
 			i = value{c.m.ConstantInt32(int32(n)), shaderir.Type{Main: shaderir.Int}}
+		}
+		if et.Main == shaderir.Bool { // the block holds bools as ints (blockType): read as != 0
+			i32 := c.m.TypeInt(32, true)
+			ptr := f.AccessChain(c.m.TypePointer(StorageClassUniform, i32), c.uniforms, c.m.ConstantInt32(int32(base.Index)), i.id)
+			return value{f.op(opINotEqual, st, f.Load(i32, ptr), c.m.ConstantInt32(0)), et}, nil
 		}
 		ptr := f.AccessChain(c.m.TypePointer(StorageClassUniform, st), c.uniforms, c.m.ConstantInt32(int32(base.Index)), i.id)
 		return value{f.Load(st, ptr), et}, nil
@@ -1824,4 +1859,12 @@ func (c *compiler) copyAssignedInputs(f *Function, block *shaderir.Block) error 
 		c.vars[cp.index] = variable{ptr: cp.ptr, typ: cp.in.typ, storage: StorageClassFunction}
 	}
 	return nil
+}
+
+// zeroOnEntry records a variable of block b to be zeroed when b is entered.
+func (c *compiler) zeroOnEntry(b *shaderir.Block, ptr, typ uint32) {
+	if c.zeroes == nil {
+		c.zeroes = map[*shaderir.Block][][2]uint32{}
+	}
+	c.zeroes[b] = append(c.zeroes[b], [2]uint32{ptr, typ})
 }
