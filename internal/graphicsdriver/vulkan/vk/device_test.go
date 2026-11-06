@@ -31,6 +31,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/builtinshader"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
+	"github.com/hajimehoshi/ebiten/v2/internal/shaderir"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/spirv"
 )
 
@@ -1601,4 +1602,81 @@ func Fragment(dst vec4, src vec2, color vec4) vec4 {
 			t.Errorf("pixel %d: %v, want red ≈ %d, green 255", i, got, int(math.Round(red*255)))
 		}
 	}
+}
+
+// Swizzle assignment and a matrix constructor from Kage: c.xy = vec2(1,
+// 0.5), c.w = 1, c.z = (mat2(2) * vec2(0.25, 0)).x — every pixel (1, 0.5,
+// 0.5, 1).
+func TestKageSwizzleAssignAndMatrix(t *testing.T) {
+	p, err := graphics.CompileShader([]byte(`//kage:unit pixels
+package main
+
+func Fragment(dst vec4, src vec2, color vec4) vec4 {
+	c := vec4(0)
+	c.xy = vec2(1, 0.5)
+	c.w = 1
+	m := mat2(2)
+	c.z = (m * vec2(0.25, 0)).x
+	return c
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	px := drawKage(t, p, 2, 1)
+	for i := 0; i < 2; i++ {
+		got := px[i*4 : i*4+4]
+		if got[0] != 255 || absDiff(got[1], 128) > 1 || absDiff(got[2], 128) > 1 || got[3] != 255 {
+			t.Errorf("pixel %d: %v, want (255, 128, 128, 255)", i, got)
+		}
+	}
+}
+
+func absDiff(a, b byte) int {
+	if a > b {
+		return int(a - b)
+	}
+	return int(b - a)
+}
+
+// drawKage draws a Kage program (both stages from the SPIR-V backend) over a
+// w×h target, white vertices, Ebitengine's uniforms with a pixel projection.
+func drawKage(t *testing.T, p *shaderir.Program, w, h int) []byte {
+	t.Helper()
+	vsWords, err := spirv.CompileVertex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsWords, err := spirv.CompileFragment(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spirvVal(t, wordsBytes(fsWords))
+	src := make([]uint32, 46)
+	for i, f := range []float32{2.0 / float32(w), 0, 0, 0, 0, 2.0 / float32(h), 0, 0, 0, 0, 1, 0, -1, -1, 0, 1} {
+		src[30+i] = math.Float32bits(f)
+	}
+	packed, err := spirv.PackStd140(nil, p.Uniforms, src, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uniforms := make([]float32, len(packed))
+	for i, x := range packed {
+		uniforms[i] = math.Float32frombits(x)
+	}
+	return drawScene(t, uint32(w), uint32(h), func(device *vk.Device) scene {
+		vs, err := device.CreateShaderModule(vsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := device.CreateShaderModule(fsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fw, fh := float32(w), float32(h)
+		v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0} }
+		verts := slices.Concat(v(0, 0), v(fw, 0), v(0, fh), v(fw, fh))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+			uniforms: uniforms, uniformRange: uint64(len(packed) * 4)}
+	})
 }

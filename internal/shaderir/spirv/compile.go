@@ -48,8 +48,9 @@ type compiler struct {
 	uniforms uint32 // the uniform block's variable (0: none)
 	vars     map[int]variable
 	types    map[shaderir.BasicType]uint32
-	result   uint32 // the fragment function's output (Location 0): where a returned value goes; 0 in the vertex function
-	inFunc   bool   // compiling a user function: a returned value is OpReturnValue
+	result   uint32        // the fragment function's output (Location 0): where a returned value goes; 0 in the vertex function
+	inFunc   bool          // compiling a user function: a returned value is OpReturnValue
+	retType  shaderir.Type // the user function's return type (an untyped number returned takes it)
 	funcs    map[int]uint32
 	loops    [][2]uint32    // the enclosing loops' continue and merge labels (innermost last): continue / break
 	textures map[int]uint32 // texture i's combined image sampler (set 0, binding 1 + i), made on first use
@@ -265,6 +266,12 @@ func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error)
 		switch s.Type {
 		case shaderir.Assign:
 			lhs := s.Exprs[0]
+			if lhs.Type == shaderir.FieldSelector {
+				if err := c.assignField(f, lhs, s.Exprs[1]); err != nil {
+					return false, err
+				}
+				continue
+			}
 			if lhs.Type != shaderir.LocalVariable {
 				return false, fmt.Errorf("spirv: assignment to expression type %d not supported yet", lhs.Type)
 			}
@@ -287,7 +294,15 @@ func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error)
 			f.Store(v.ptr, rhs.id)
 		case shaderir.Return:
 			if len(s.Exprs) > 0 {
-				v, err := c.expr(f, s.Exprs[0])
+				var v value
+				var err error
+				if c.inFunc && s.Exprs[0].Type == shaderir.NumberExpr && (c.retType.Main == shaderir.Int || c.retType.Main == shaderir.Float) {
+					var id uint32 // an untyped number takes the function's return type
+					id, err = c.forConst(c.retType, s.Exprs[0].Const)
+					v = value{id, c.retType}
+				} else {
+					v, err = c.expr(f, s.Exprs[0])
+				}
 				if err != nil {
 					return false, err
 				}
@@ -525,6 +540,8 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			t = shaderir.Type{Main: shaderir.Vec3}
 		case shaderir.Vec4F:
 			t = shaderir.Type{Main: shaderir.Vec4}
+		case shaderir.Mat2F, shaderir.Mat3F, shaderir.Mat4F:
+			return c.matrixConstructor(f, callee.BuiltinFunc, e.Exprs[1:])
 		default:
 			return value{}, fmt.Errorf("spirv: built-in %s not supported yet", callee.BuiltinFunc)
 		}
@@ -682,7 +699,8 @@ func isIntish(t shaderir.Type) bool {
 // a scalar on either side — the scalar spread for + − /, VectorTimesScalar
 // for *) and on ints / int vectors of one type. ok false: not one of these.
 func (c *compiler) arithmetic(f *Function, op shaderir.Op, l, r value) (value, bool, error) {
-	if op != shaderir.Add && op != shaderir.Sub && op != shaderir.ComponentWiseMul && op != shaderir.Div {
+	if op != shaderir.Add && op != shaderir.Sub && op != shaderir.ComponentWiseMul && op != shaderir.Div &&
+		!(isIntish(l.typ) && (op == shaderir.And || op == shaderir.Or || op == shaderir.Xor || op == shaderir.LeftShift || op == shaderir.RightShift)) {
 		return value{}, false, nil
 	}
 	switch {
@@ -724,6 +742,16 @@ func (c *compiler) arithmetic(f *Function, op shaderir.Op, l, r value) (value, b
 	case isIntish(l.typ) && l.typ.Main == r.typ.Main:
 		t, _ := c.typ(l.typ)
 		switch op {
+		case shaderir.And:
+			return value{f.BitwiseAnd(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.Or:
+			return value{f.op(opBitwiseOr, t, l.id, r.id), l.typ}, true, nil
+		case shaderir.Xor:
+			return value{f.op(opBitwiseXor, t, l.id, r.id), l.typ}, true, nil
+		case shaderir.LeftShift:
+			return value{f.ShiftLeftLogical(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.RightShift:
+			return value{f.op(opShiftRightArithmetic, t, l.id, r.id), l.typ}, true, nil
 		case shaderir.Add:
 			return value{f.IAdd(t, l.id, r.id), l.typ}, true, nil
 		case shaderir.Sub:
@@ -828,9 +856,9 @@ func (c *compiler) userFunc(fn *shaderir.Func) error {
 		outTypes[j] = st
 		params = append(params, c.m.TypePointer(StorageClassFunction, st))
 	}
-	saved, savedResult, savedIn := c.vars, c.result, c.inFunc
-	c.vars, c.result, c.inFunc = map[int]variable{}, 0, true
-	defer func() { c.vars, c.result, c.inFunc = saved, savedResult, savedIn }()
+	saved, savedResult, savedIn, savedRet := c.vars, c.result, c.inFunc, c.retType
+	c.vars, c.result, c.inFunc, c.retType = map[int]variable{}, 0, true, fn.Return
+	defer func() { c.vars, c.result, c.inFunc, c.retType = saved, savedResult, savedIn, savedRet }()
 	var bodyErr error
 	id := c.m.Function(ret, c.m.TypeFunction(ret, params...), func(f *Function) {
 		ids := make([]uint32, len(params))
@@ -993,10 +1021,29 @@ func (c *compiler) mathBuiltin(f *Function, fn shaderir.BuiltinFunc, args []shad
 		if err != nil {
 			return value{}, true, err
 		}
+		vals[i] = v
+	}
+	if len(vals) > 0 && isIntish(vals[0].typ) { // the integer forms: SAbs, SSign, SMin, SMax, SClamp
+		intExt := map[shaderir.BuiltinFunc]uint32{shaderir.Abs: 5, shaderir.Sign: 7, shaderir.Min: 39, shaderir.Max: 42, shaderir.Clamp: 45}
+		e, ok := intExt[fn]
+		if !ok {
+			return value{}, true, fmt.Errorf("spirv: %s on %s not supported yet", fn, vals[0].typ.String())
+		}
+		t := vals[0].typ
+		tt, _ := c.typ(t)
+		ids := make([]uint32, len(vals))
+		for i, v := range vals {
+			ids[i] = v.id
+			if args[i].Type == shaderir.NumberExpr { // a bare number among ints: an int
+				ids[i], _ = c.forConst(shaderir.Type{Main: shaderir.Int}, args[i].Const)
+			}
+		}
+		return value{f.GLSL(tt, e, ids...), t}, true, nil
+	}
+	for _, v := range vals {
 		if !isFloatish(v.typ) {
 			return value{}, true, fmt.Errorf("spirv: %s on %s not supported yet", fn, v.typ.String())
 		}
-		vals[i] = v
 	}
 	if len(vals) == 0 {
 		return value{}, true, fmt.Errorf("spirv: %s without arguments", fn)
@@ -1237,4 +1284,145 @@ func CompileLibrary(p *shaderir.Program) ([]uint32, error) {
 	c.m.EntryPoint(ExecutionModelFragment, main, "main", ifaces...)
 	c.m.ExecutionMode(main, ExecutionModeOriginUpperLeft)
 	return c.m.Words(), nil
+}
+
+// swizzleIndices are a swizzle's component numbers (xyzw).
+func swizzleIndices(sw string) ([]uint32, error) {
+	idx := make([]uint32, len(sw))
+	for i, ch := range sw {
+		switch ch {
+		case 'x':
+			idx[i] = 0
+		case 'y':
+			idx[i] = 1
+		case 'z':
+			idx[i] = 2
+		case 'w':
+			idx[i] = 3
+		default:
+			return nil, fmt.Errorf("spirv: swizzle %q", sw)
+		}
+	}
+	return idx, nil
+}
+
+// assignField is v.x = e (one component: stored through an access chain) or
+// v.xy = e (several: the vector loaded, the new components shuffled in,
+// stored back) for a local vector variable.
+func (c *compiler) assignField(f *Function, lhs, rhsExpr shaderir.Expr) error {
+	base := lhs.Exprs[0]
+	if base.Type != shaderir.LocalVariable {
+		return fmt.Errorf("spirv: assignment to a field of expression type %d not supported yet", base.Type)
+	}
+	v, ok := c.vars[base.Index]
+	if !ok || v.input {
+		return fmt.Errorf("spirv: assignment to a field of local %d (an attribute or unknown) not supported yet", base.Index)
+	}
+	idx, err := swizzleIndices(lhs.Exprs[1].Swizzling)
+	if err != nil {
+		return err
+	}
+	scalar := shaderir.Type{Main: shaderir.Float}
+	if isIntish(v.typ) {
+		scalar = shaderir.Type{Main: shaderir.Int}
+	}
+	var rhs value
+	if rhsExpr.Type == shaderir.NumberExpr && len(idx) == 1 {
+		id, err := c.forConst(scalar, rhsExpr.Const)
+		if err != nil {
+			return err
+		}
+		rhs = value{id, scalar}
+	} else if rhs, err = c.expr(f, rhsExpr); err != nil {
+		return err
+	}
+	if len(idx) == 1 {
+		st, _ := c.typ(scalar)
+		ptr := f.AccessChain(c.m.TypePointer(v.storage, st), v.ptr, c.m.ConstantInt32(int32(idx[0])))
+		f.Store(ptr, rhs.id)
+		return nil
+	}
+	vt, err := c.typ(v.typ)
+	if err != nil {
+		return err
+	}
+	n := uint32(v.typ.DwordCount())
+	comps := make([]uint32, n)
+	for i := range comps {
+		comps[i] = uint32(i) // the old component …
+	}
+	for k, ci := range idx {
+		comps[ci] = n + uint32(k) // … or the new one from the right side
+	}
+	old := f.Load(vt, v.ptr)
+	f.Store(v.ptr, f.VectorShuffle(vt, old, rhs.id, comps...))
+	return nil
+}
+
+// matrixConstructor is mat2 / mat3 / mat4 of a scalar (that diagonal, zeros
+// elsewhere), of its column vectors, or of all its components in column
+// order (a mix of scalars and vectors filling the columns).
+func (c *compiler) matrixConstructor(f *Function, fn shaderir.BuiltinFunc, args []shaderir.Expr) (value, error) {
+	n := map[shaderir.BuiltinFunc]int{shaderir.Mat2F: 2, shaderir.Mat3F: 3, shaderir.Mat4F: 4}[fn]
+	mt := shaderir.Type{Main: shaderir.Mat2 + shaderir.BasicType(n-2)}
+	colT := shaderir.Type{Main: shaderir.Vec2 + shaderir.BasicType(n-2)}
+	mtt, _ := c.typ(mt)
+	ct, _ := c.typ(colT)
+	f32 := c.m.TypeFloat(32)
+	var vals []value
+	for _, a := range args {
+		if a.Type == shaderir.NumberExpr {
+			id, err := c.forConst(shaderir.Type{Main: shaderir.Float}, a.Const)
+			if err != nil {
+				return value{}, err
+			}
+			vals = append(vals, value{id, shaderir.Type{Main: shaderir.Float}})
+			continue
+		}
+		v, err := c.expr(f, a)
+		if err != nil {
+			return value{}, err
+		}
+		vals = append(vals, v)
+	}
+	if len(vals) == 1 && vals[0].typ.Main == shaderir.Float { // the diagonal
+		zero := c.m.ConstantFloat32(0)
+		cols := make([]uint32, n)
+		for i := range cols {
+			parts := make([]uint32, n)
+			for j := range parts {
+				parts[j] = zero
+				if i == j {
+					parts[j] = vals[0].id
+				}
+			}
+			cols[i] = f.CompositeConstruct(ct, parts...)
+		}
+		return value{f.CompositeConstruct(mtt, cols...), mt}, nil
+	}
+	if len(vals) == 1 && vals[0].typ.Main == mt.Main { // a copy
+		return vals[0], nil
+	}
+	// the components in column order, vectors spread into their scalars
+	var flat []uint32
+	for _, v := range vals {
+		switch {
+		case v.typ.Main == shaderir.Float:
+			flat = append(flat, v.id)
+		case isFloatish(v.typ):
+			for i := 0; i < v.typ.DwordCount(); i++ {
+				flat = append(flat, f.CompositeExtract(f32, v.id, uint32(i)))
+			}
+		default:
+			return value{}, fmt.Errorf("spirv: %s of %s not supported yet", fn, v.typ.String())
+		}
+	}
+	if len(flat) != n*n {
+		return value{}, fmt.Errorf("spirv: %s with %d components", fn, len(flat))
+	}
+	cols := make([]uint32, n)
+	for i := range cols {
+		cols[i] = f.CompositeConstruct(ct, flat[i*n:i*n+n]...)
+	}
+	return value{f.CompositeConstruct(mtt, cols...), mt}, nil
 }

@@ -76,7 +76,7 @@ func TestCoverage(t *testing.T) {
 	}
 	sort.Slice(keys, func(i, j int) bool { return len(reasons[keys[i]]) > len(reasons[keys[j]]) })
 	t.Logf("%d of %d compile", ok, len(files))
-	const floor = 46 // 2026-11-06
+	const floor = 58 // 2026-11-06
 	if ok < floor {
 		t.Errorf("only %d of the test programs compile, fewer than %d before", ok, floor)
 	}

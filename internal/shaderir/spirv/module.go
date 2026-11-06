@@ -49,6 +49,9 @@ const (
 	opTypeImage              = 25
 	opTypeSampledImage       = 27
 	opVectorShuffle          = 79
+	opBitwiseOr              = 197
+	opBitwiseXor             = 198
+	opShiftRightArithmetic   = 195
 	opConstantNull           = 46
 	opConvertFToS            = 110
 	opLoopMerge              = 246
