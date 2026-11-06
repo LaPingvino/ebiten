@@ -19,6 +19,7 @@ package vulkan
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/glfw"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
@@ -26,8 +27,7 @@ import (
 
 // presenting is the window's side of the driver: the X11 window's surface,
 // the swapchain the screen is shown through, and the semaphores between
-// acquiring, drawing and presenting. PARTIAL: X11 only (Wayland next);
-// FIFO always (SetVsyncEnabled ignored).
+// acquiring, drawing and presenting. PARTIAL: X11 only (Wayland next).
 type presenting struct {
 	hasSurfaceExt, hasSwapchainExt bool
 	window                         uintptr // the X11 window SetWindow gave (its surface made at the first present)
@@ -38,7 +38,9 @@ type presenting struct {
 	swapLayouts                    []uint32
 	swapFormat                     uint32
 	swapW, swapH                   int
-	swapStale                      bool                         // rebuilt before the next present (out of date / suboptimal)
+	swapStale                      bool
+	vsyncOff                       bool                         // SetVsyncEnabled(false): MAILBOX, else IMMEDIATE, else FIFO
+	presentMode                    uint32                       // the swapchain's                         // rebuilt before the next present (out of date / suboptimal)
 	acquired                       [framesInFlight]vk.Semaphore // per batch slot: the image acquired for it
 	rendered                       []vk.Semaphore               // per swapchain image: drawn, may be presented
 	submitWait                     vk.Semaphore                 // the next submit's wait (0: none)
@@ -96,6 +98,16 @@ func (g *Graphics) makeSwapchain() error {
 			break
 		}
 	}
+	mode := vk.PresentModeFifoKHR // vsync: always there
+	if g.vsyncOff {
+		modes, _ := vk.SurfacePresentModes(g.instance, g.physical, g.surface)
+		for _, want := range []uint32{vk.PresentModeMailboxKHR, vk.PresentModeImmediateKHR} {
+			if slices.Contains(modes, want) {
+				mode = want
+				break
+			}
+		}
+	}
 	n := max(caps.MinImageCount+1, 2)
 	if caps.MaxImageCount != 0 {
 		n = min(n, caps.MaxImageCount)
@@ -112,7 +124,7 @@ func (g *Graphics) makeSwapchain() error {
 		Surface: g.surface, MinImageCount: n, ImageFormat: format.Format, ImageColorSpace: format.ColorSpace,
 		ImageExtent: vk.Extent2D{Width: w, Height: h}, ImageArrayLayers: 1,
 		ImageUsage: vk.ImageUsageTransferDstBit | vk.ImageUsageColorAttachmentBit, ImageSharingMode: vk.SharingModeExclusive,
-		PreTransform: caps.CurrentTransform, CompositeAlpha: vk.CompositeAlphaOpaqueBitKHR, PresentMode: vk.PresentModeFifoKHR,
+		PreTransform: caps.CurrentTransform, CompositeAlpha: vk.CompositeAlphaOpaqueBitKHR, PresentMode: mode,
 		Clipped: 1, OldSwapchain: old,
 	})
 	if old != 0 {
@@ -122,7 +134,7 @@ func (g *Graphics) makeSwapchain() error {
 		g.swapchain = 0
 		return fmt.Errorf("vulkan: %w", err)
 	}
-	g.swapchain, g.swapFormat, g.swapW, g.swapH, g.swapStale = sc, format.Format, int(w), int(h), false
+	g.swapchain, g.swapFormat, g.swapW, g.swapH, g.swapStale, g.presentMode = sc, format.Format, int(w), int(h), false, mode
 	if g.swapImages, err = g.device.SwapchainImages(sc); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
@@ -231,5 +243,18 @@ func (g *Graphics) destroyPresenting() {
 	if g.surface != 0 {
 		vk.DestroySurface(g.instance, g.surface)
 		g.surface = 0
+	}
+}
+
+// SetVsyncEnabled chooses the present mode: FIFO with vsync; without, the
+// lowest-latency mode the surface offers (MAILBOX, else IMMEDIATE). The
+// swapchain is remade at the next present when it changes.
+func (g *Graphics) SetVsyncEnabled(enabled bool) {
+	if g.vsyncOff == !enabled {
+		return
+	}
+	g.vsyncOff = !enabled
+	if g.swapchain != 0 {
+		g.swapStale = true
 	}
 }

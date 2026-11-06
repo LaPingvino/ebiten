@@ -47,6 +47,8 @@ const (
 	StructureTypeXlibSurfaceCreateInfoKHR StructureType = 1000004000
 	ImageLayoutPresentSrcKHR              uint32        = 1000001002
 	ColorSpaceSRGBNonlinearKHR            uint32        = 0
+	PresentModeImmediateKHR               uint32        = 0
+	PresentModeMailboxKHR                 uint32        = 1
 	PresentModeFifoKHR                    uint32        = 2
 	CompositeAlphaOpaqueBitKHR            uint32        = 0x1
 	SurfaceTransformIdentityBitKHR        uint32        = 0x1
@@ -354,4 +356,23 @@ func (d *Device) CmdBlitImage(cb CommandBuffer, src Image, srcLayout uint32, dst
 	*r = region
 	pinner.Pin(r)
 	purego.SyscallN(d.ext.cmdBlitImage, uintptr(cb), uintptr(src), uintptr(srcLayout), uintptr(dst), uintptr(dstLayout), 1, uintptr(unsafe.Pointer(r)), uintptr(filter))
+}
+
+// SurfacePresentModes is vkGetPhysicalDeviceSurfacePresentModesKHR (FIFO is
+// always among them).
+func SurfacePresentModes(instance Instance, physical PhysicalDevice, s SurfaceKHR) ([]uint32, error) {
+	fn := procAddr(instance, "vkGetPhysicalDeviceSurfacePresentModesKHR")
+	if fn == 0 {
+		return nil, fmt.Errorf("vk: vkGetPhysicalDeviceSurfacePresentModesKHR is not available")
+	}
+	var n uint32
+	if r, _, _ := purego.SyscallN(fn, uintptr(physical), uintptr(s), uintptr(unsafe.Pointer(&n)), 0); result(r) != nil {
+		return nil, result(r)
+	}
+	out := make([]uint32, n)
+	if n == 0 {
+		return out, nil
+	}
+	r, _, _ := purego.SyscallN(fn, uintptr(physical), uintptr(s), uintptr(unsafe.Pointer(&n)), uintptr(unsafe.Pointer(&out[0])))
+	return out[:n], result(r)
 }

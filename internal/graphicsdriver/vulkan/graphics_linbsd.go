@@ -370,8 +370,6 @@ func (g *Graphics) NewScreenFramebufferImage(width, height int) (graphicsdriver.
 	return img, nil
 }
 
-func (g *Graphics) SetVsyncEnabled(enabled bool) {}
-
 func (g *Graphics) NeedsClearingScreen() bool { return true }
 
 func (g *Graphics) MaxImageSize() int { return g.maxImage }

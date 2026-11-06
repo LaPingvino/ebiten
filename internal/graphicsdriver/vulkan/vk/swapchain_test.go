@@ -19,6 +19,7 @@ package vk_test
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
@@ -155,6 +156,11 @@ func TestSwapchainPresent(t *testing.T) {
 	if err != nil || len(formats) == 0 {
 		t.Fatalf("surface formats: %v %v", formats, err)
 	}
+	modes, err := vk.SurfacePresentModes(instance, physical, surface)
+	if err != nil || !slices.Contains(modes, vk.PresentModeFifoKHR) {
+		t.Errorf("present modes %v (%v): FIFO must be among them", modes, err)
+	}
+	t.Logf("present modes %v", modes)
 	format := formats[0]
 	for _, f := range formats {
 		if f.Format == vk.FormatB8G8R8A8Unorm {
