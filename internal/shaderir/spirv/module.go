@@ -34,51 +34,55 @@ const (
 
 // Opcodes (§3.52) the module uses.
 const (
-	opName               = 5
-	opMemoryModel        = 14
-	opEntryPoint         = 15
-	opExecutionMode      = 16
-	opCapability         = 17
-	opTypeVoid           = 19
-	opTypeBool           = 20
-	opTypeInt            = 21
-	opTypeFloat          = 22
-	opTypeVector         = 23
-	opTypeMatrix         = 24
-	opTypeArray          = 28
-	opTypeStruct         = 30
-	opTypePointer        = 32
-	opConstant           = 43
-	opConstantComposite  = 44
-	opVariable           = 59
-	opLoad               = 61
-	opStore              = 62
-	opDecorate           = 71
-	opMemberDecorate     = 72
-	opAccessChain        = 65
-	opMatrixTimesVector  = 145
-	opTypeFunction       = 33
-	opFunction           = 54
-	opFunctionEnd        = 56
-	opCompositeConstruct = 80
-	opCompositeExtract   = 81
-	opConvertSToF        = 111
-	opFSub               = 131
-	opFunctionParameter  = 55
-	opFunctionCall       = 57
-	opReturnValue        = 254
-	opIAdd               = 128
-	opFAdd               = 129
-	opISub               = 130
-	opIMul               = 132
-	opSDiv               = 135
-	opFDiv               = 136
-	opVectorTimesScalar  = 142
-	opFMul               = 133
-	opShiftLeftLogical   = 196
-	opBitwiseAnd         = 199
-	opLabel              = 248
-	opReturn             = 253
+	opName                   = 5
+	opMemoryModel            = 14
+	opEntryPoint             = 15
+	opExecutionMode          = 16
+	opCapability             = 17
+	opTypeVoid               = 19
+	opTypeBool               = 20
+	opTypeInt                = 21
+	opTypeFloat              = 22
+	opTypeVector             = 23
+	opTypeMatrix             = 24
+	opTypeArray              = 28
+	opTypeImage              = 25
+	opTypeSampledImage       = 27
+	opVectorShuffle          = 79
+	opImageSampleExplicitLod = 88
+	opTypeStruct             = 30
+	opTypePointer            = 32
+	opConstant               = 43
+	opConstantComposite      = 44
+	opVariable               = 59
+	opLoad                   = 61
+	opStore                  = 62
+	opDecorate               = 71
+	opMemberDecorate         = 72
+	opAccessChain            = 65
+	opMatrixTimesVector      = 145
+	opTypeFunction           = 33
+	opFunction               = 54
+	opFunctionEnd            = 56
+	opCompositeConstruct     = 80
+	opCompositeExtract       = 81
+	opConvertSToF            = 111
+	opFSub                   = 131
+	opFunctionParameter      = 55
+	opFunctionCall           = 57
+	opReturnValue            = 254
+	opIAdd                   = 128
+	opFAdd                   = 129
+	opISub                   = 130
+	opIMul                   = 132
+	opSDiv                   = 135
+	opFDiv                   = 136
+	opVectorTimesScalar      = 142
+	opFMul                   = 133
+	opShiftLeftLogical       = 196
+	opBitwiseAnd             = 199
+	opLabel                  = 248
+	opReturn                 = 253
 )
 
 // Operand values.
@@ -91,10 +95,11 @@ const (
 	ExecutionModeOriginUpperLeft = 7
 	FunctionControlNone          = 0
 
-	StorageClassInput    = 1
-	StorageClassUniform  = 2
-	StorageClassOutput   = 3
-	StorageClassFunction = 7
+	StorageClassUniformConstant = 0
+	StorageClassInput           = 1
+	StorageClassUniform         = 2
+	StorageClassOutput          = 3
+	StorageClassFunction        = 7
 
 	DecorationBlock         = 2
 	DecorationColMajor      = 5
@@ -238,6 +243,19 @@ func (m *Module) TypeVector(component, n uint32) uint32 {
 // TypeMatrix is OpTypeMatrix of n column vectors.
 func (m *Module) TypeMatrix(column, n uint32) uint32 {
 	return m.typeID(key("mat", column, n), func(id uint32) { inst(&m.types, opTypeMatrix, id, column, n) })
+}
+
+// TypeImage2D is OpTypeImage of a sampled 2D float image (not depth,
+// arrayed or multisampled; format unknown) — what a texture is.
+func (m *Module) TypeImage2D() uint32 {
+	f := m.TypeFloat(32)
+	return m.typeID(key("img2d", f), func(id uint32) { inst(&m.types, opTypeImage, id, f, 1, 0, 0, 0, 1, 0) })
+}
+
+// TypeSampledImage is OpTypeSampledImage of an image type (a combined image
+// sampler's type).
+func (m *Module) TypeSampledImage(image uint32) uint32 {
+	return m.typeID(key("simg", image), func(id uint32) { inst(&m.types, opTypeSampledImage, id, image) })
 }
 
 // TypeArray is OpTypeArray of n elements (its length an unsigned constant).
@@ -414,6 +432,18 @@ func (f *Function) IMul(typ, a, b uint32) uint32 { return f.op(opIMul, typ, a, b
 func (f *Function) SDiv(typ, a, b uint32) uint32 { return f.op(opSDiv, typ, a, b) }
 func (f *Function) VectorTimesScalar(typ, v, s uint32) uint32 {
 	return f.op(opVectorTimesScalar, typ, v, s)
+}
+
+// VectorShuffle picks components of two vectors (indices into a ++ b).
+func (f *Function) VectorShuffle(typ, a, b uint32, components ...uint32) uint32 {
+	return f.op(opVectorShuffle, typ, append([]uint32{a, b}, components...)...)
+}
+
+// ImageSampleExplicitLod samples a sampled image at coordinates with an
+// explicit level of detail (ImageOperands Lod) — the only way with
+// unnormalized coordinates.
+func (f *Function) ImageSampleExplicitLod(typ, sampledImage, coord, lod uint32) uint32 {
+	return f.op(opImageSampleExplicitLod, typ, sampledImage, coord, 0x2, lod)
 }
 
 // Return ends a block, returning nothing.

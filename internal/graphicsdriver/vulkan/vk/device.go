@@ -44,6 +44,7 @@ type Device struct {
 		createDescriptorSetLayout, destroyDescriptorSetLayout                          uintptr
 		createDescriptorPool, destroyDescriptorPool, allocateDescriptorSets            uintptr
 		updateDescriptorSets, cmdBindDescriptorSets                                    uintptr
+		createSampler, destroySampler, cmdCopyBufferToImage                            uintptr
 	}
 }
 
@@ -107,6 +108,9 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkAllocateDescriptorSets", &d.fn.allocateDescriptorSets},
 		{"vkUpdateDescriptorSets", &d.fn.updateDescriptorSets},
 		{"vkCmdBindDescriptorSets", &d.fn.cmdBindDescriptorSets},
+		{"vkCreateSampler", &d.fn.createSampler},
+		{"vkDestroySampler", &d.fn.destroySampler},
+		{"vkCmdCopyBufferToImage", &d.fn.cmdCopyBufferToImage},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))

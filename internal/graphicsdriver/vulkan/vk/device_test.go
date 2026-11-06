@@ -493,7 +493,12 @@ type scene struct {
 	uniforms      []float32
 	uniformRange  uint64
 	uniformOffset uint32
-	count         uint32
+	// texture: an RGBA image (texW × texH, rows top-down) uploaded and bound
+	// as a combined image sampler (set 0, binding 1, the fragment stage)
+	// with Ebitengine's texel sampler
+	texture    []byte
+	texW, texH uint32
+	count      uint32
 }
 
 // drawScene renders a scene into a w×h RGBA image cleared blue and reads the
@@ -595,15 +600,26 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 	}
 	var setLayouts []vk.DescriptorSetLayout
 	var set vk.DescriptorSet
+	var bindings []vk.DescriptorSetLayoutBinding
+	var sizes []vk.DescriptorPoolSize
 	if len(sc.uniforms) > 0 {
-		sl, err := device.CreateDescriptorSetLayout(vk.DescriptorSetLayoutBinding{
-			DescriptorType: vk.DescriptorTypeUniformBufferDynamic, DescriptorCount: 1, StageFlags: vk.ShaderStageVertexBit})
+		bindings = append(bindings, vk.DescriptorSetLayoutBinding{Binding: 0, DescriptorType: vk.DescriptorTypeUniformBufferDynamic, DescriptorCount: 1,
+			StageFlags: vk.ShaderStageVertexBit | vk.ShaderStageFragmentBit})
+		sizes = append(sizes, vk.DescriptorPoolSize{Type: vk.DescriptorTypeUniformBufferDynamic, DescriptorCount: 1})
+	}
+	if sc.texture != nil {
+		bindings = append(bindings, vk.DescriptorSetLayoutBinding{Binding: 1, DescriptorType: vk.DescriptorTypeCombinedImageSampler, DescriptorCount: 1,
+			StageFlags: vk.ShaderStageFragmentBit})
+		sizes = append(sizes, vk.DescriptorPoolSize{Type: vk.DescriptorTypeCombinedImageSampler, DescriptorCount: 1})
+	}
+	if len(bindings) > 0 {
+		sl, err := device.CreateDescriptorSetLayout(bindings...)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer device.DestroyDescriptorSetLayout(sl)
 		setLayouts = append(setLayouts, sl)
-		pool, err := device.CreateDescriptorPool(1, vk.DescriptorPoolSize{Type: vk.DescriptorTypeUniformBufferDynamic, DescriptorCount: 1})
+		pool, err := device.CreateDescriptorPool(1, sizes...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -611,6 +627,58 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 		if set, err = device.AllocateDescriptorSet(pool, sl); err != nil {
 			t.Fatal(err)
 		}
+	}
+	var texImg vk.Image
+	var texStage vk.Buffer
+	if sc.texture != nil {
+		var err error
+		if texImg, err = device.CreateImage2D(sc.texW, sc.texH, vk.FormatR8G8B8A8Unorm, vk.ImageUsageSampledBit|vk.ImageUsageTransferDstBit); err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyImage(texImg)
+		treq := device.ImageMemoryRequirements(texImg)
+		ttyp, _ := props.FindMemoryType(treq.MemoryTypeBits, 0)
+		tmem, err := device.AllocateMemory(treq.Size, ttyp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.FreeMemory(tmem)
+		if err := device.BindImageMemory(texImg, tmem, 0); err != nil {
+			t.Fatal(err)
+		}
+		tview, err := device.CreateImageView2D(texImg, vk.FormatR8G8B8A8Unorm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyImageView(tview)
+		sampler, err := device.CreateTexelSampler()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroySampler(sampler)
+		if texStage, err = device.CreateBuffer(uint64(len(sc.texture)), vk.BufferUsageTransferSrcBit); err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyBuffer(texStage)
+		sreq := device.BufferMemoryRequirements(texStage)
+		styp, _ := props.FindMemoryType(sreq.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+		smem, err := device.AllocateMemory(sreq.Size, styp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.FreeMemory(smem)
+		if err := device.BindBufferMemory(texStage, smem, 0); err != nil {
+			t.Fatal(err)
+		}
+		mp, err := device.MapMemory(smem, 0, uint64(len(sc.texture)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy(mp, sc.texture)
+		device.UnmapMemory(smem)
+		device.WriteCombinedImageSampler(set, 1, sampler, tview, vk.ImageLayoutShaderReadOnlyOptimal)
+	}
+	if len(sc.uniforms) > 0 {
 		size := uint64(len(sc.uniforms) * 4)
 		ubuf, err := device.CreateBuffer(size, vk.BufferUsageUniformBufferBit)
 		if err != nil {
@@ -682,6 +750,25 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 	if err := device.BeginCommandBuffer(cb, vk.CommandBufferUsageOneTimeSubmitBit); err != nil {
 		t.Fatal(err)
 	}
+	if texImg != 0 { // the texture uploaded: undefined → transfer dst, the copy, → shader read-only
+		device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+			DstStageMask: vk.PipelineStage2AllTransfer, DstAccessMask: vk.Access2TransferWrite,
+			OldLayout: vk.ImageLayoutUndefined, NewLayout: vk.ImageLayoutTransferDstOptimal,
+			SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+			Image: texImg, SubresourceRange: vk.ColorRange,
+		})
+		device.CmdCopyBufferToImage(cb, texStage, texImg, vk.ImageLayoutTransferDstOptimal, vk.BufferImageCopy{
+			ImageSubresource: vk.ImageSubresourceLayers{AspectMask: vk.ImageAspectColorBit, LayerCount: 1},
+			ImageExtent:      vk.Extent3D{Width: sc.texW, Height: sc.texH, Depth: 1},
+		})
+		device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+			SrcStageMask: vk.PipelineStage2AllTransfer, SrcAccessMask: vk.Access2TransferWrite,
+			DstStageMask: vk.PipelineStage2FragmentShader, DstAccessMask: vk.Access2ShaderSampledRead,
+			OldLayout: vk.ImageLayoutTransferDstOptimal, NewLayout: vk.ImageLayoutShaderReadOnlyOptimal,
+			SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+			Image: texImg, SubresourceRange: vk.ColorRange,
+		})
+	}
 	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
 		DstStageMask: vk.PipelineStage2ColorAttachmentOutput, DstAccessMask: vk.Access2ColorAttachmentWrite,
 		OldLayout: vk.ImageLayoutUndefined, NewLayout: vk.ImageLayoutColorAttachmentOptimal,
@@ -692,7 +779,11 @@ func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
 	device.CmdBeginRendering(cb, view, area, [4]float32{0, 0, 1, 1})
 	device.CmdBindGraphicsPipeline(cb, pipeline)
 	if set != 0 {
-		device.CmdBindDescriptorSet(cb, layout, set, sc.uniformOffset)
+		if len(sc.uniforms) > 0 {
+			device.CmdBindDescriptorSet(cb, layout, set, sc.uniformOffset)
+		} else {
+			device.CmdBindDescriptorSet(cb, layout, set)
+		}
 	}
 	device.CmdSetViewport(cb, vk.Viewport{Width: float32(w), Height: float32(h), MaxDepth: 1})
 	device.CmdSetScissor(cb, area)
@@ -1183,6 +1274,59 @@ func TestKageEndToEnd(t *testing.T) {
 					t.Fatalf("%s: pixel %d,%d: %v (%v expected: %v)", c.body, x, y, got, c.want, want)
 				}
 			}
+		}
+	}
+}
+
+// Sampling with Ebitengine's texel sampler: a 2×2 texture (red, green /
+// blue, white) drawn over a 4×2 target, each pixel sampling at its own
+// position (gl_FragCoord.xy: pixel centres, unnormalized, explicit LOD 0):
+// the left 2×2 is the texture texel for texel; the right half, outside it,
+// transparent (clamp-to-border, transparent black) — as Metal's
+// clamp_to_zero.
+func TestTexelSampling(t *testing.T) {
+	tex := []byte{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}
+	px := drawScene(t, 4, 2, func(device *vk.Device) scene {
+		vs, unused := shaders(t, device, [4]float32{0, 0, 0, 1}, 2) // the full-target triangle
+		device.DestroyShaderModule(unused)
+		frag := spirv.NewModule()
+		frag.Capability(spirv.CapabilityShader)
+		frag.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+		f32 := frag.TypeFloat(32)
+		vec2, vec4 := frag.TypeVector(f32, 2), frag.TypeVector(f32, 4)
+		simg := frag.TypeSampledImage(frag.TypeImage2D())
+		texVar := frag.Variable(frag.TypePointer(spirv.StorageClassUniformConstant, simg), spirv.StorageClassUniformConstant)
+		frag.Decorate(texVar, spirv.DecorationDescriptorSet, 0)
+		frag.Decorate(texVar, spirv.DecorationBinding, 1)
+		coord := frag.Variable(frag.TypePointer(spirv.StorageClassInput, vec4), spirv.StorageClassInput)
+		frag.Decorate(coord, spirv.DecorationBuiltIn, spirv.BuiltInFragCoord)
+		out := frag.Variable(frag.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+		frag.Decorate(out, spirv.DecorationLocation, 0)
+		lod := frag.ConstantFloat32(0)
+		void := frag.TypeVoid()
+		fmain := frag.Function(void, frag.TypeFunction(void), func(f *spirv.Function) {
+			f.Label()
+			fc := f.Load(vec4, coord)
+			xy := f.VectorShuffle(vec2, fc, fc, 0, 1)
+			f.Store(out, f.ImageSampleExplicitLod(vec4, f.Load(simg, texVar), xy, lod))
+			f.Return()
+		})
+		frag.EntryPoint(spirv.ExecutionModelFragment, fmain, "main", coord, out, texVar)
+		frag.ExecutionMode(fmain, spirv.ExecutionModeOriginUpperLeft)
+		spirvVal(t, frag.Bytes())
+		fs, err := device.CreateShaderModule(frag.Words())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scene{vs: vs, fs: fs, count: 3, texture: tex, texW: 2, texH: 2}
+	})
+	want := [][4]byte{
+		{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 0, 0}, {0, 0, 0, 0},
+		{0, 0, 255, 255}, {255, 255, 255, 255}, {0, 0, 0, 0}, {0, 0, 0, 0},
+	}
+	for i, w := range want {
+		if got := [4]byte(px[i*4 : i*4+4]); got != w {
+			t.Errorf("pixel %d,%d: %v, want %v", i%4, i/4, got, w)
 		}
 	}
 }

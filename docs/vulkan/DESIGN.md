@@ -57,8 +57,11 @@ DirectX flip because their NDC points up over a top-down framebuffer; Vulkan has
 offscreen images or the swapchain (row 0 shown at the top). The first plan here — negate Y as Metal does —
 would have drawn every image upside down; TestCompiledVertexShader checks both ways.
 
-**Textures**: each source image is a combined image sampler with nearest filtering and clamp-to-edge
-addressing (Ebitengine samples texels exactly — `__texelAt`); one descriptor set per draw from the frame's
+**Textures** (sampler corrected 2026-11-06): each source image is a combined image sampler (set 0, bindings
+1–4) with **unnormalized coordinates, nearest filtering and clamp-to-border transparent black** — Metal's
+`sampler(coord::pixel, filter::nearest, address::clamp_to_zero)`: `__texelAt` reads by pixel position (the
+shader floors it, explicit LOD 0) and a read outside the image is transparent, which the linear-filter shaders
+rely on at the edges (clamp-to-edge would smear the edge texels outward); one descriptor set per draw from the frame's
 pool, holding the uniform buffer and up to `ShaderSrcImageCount` images.
 
 **Images** are `VK_FORMAT_R8G8B8A8_UNORM`, optimally tiled, in device-local memory; `WritePixels` goes
