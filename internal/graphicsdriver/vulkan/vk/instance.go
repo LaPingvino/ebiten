@@ -54,8 +54,9 @@ func EnumerateInstanceVersion() (uint32, error) {
 }
 
 // CreateInstance is vkCreateInstance, with the given application name, API
-// version and instance extensions.
-func CreateInstance(appName string, apiVersion uint32, extensions []string) (Instance, error) {
+// version, instance extensions and layers (e.g. LayerKhronosValidation;
+// ErrorLayerNotPresent when one isn't installed).
+func CreateInstance(appName string, apiVersion uint32, extensions, layers []string) (Instance, error) {
 	if err := load(); err != nil {
 		return 0, err
 	}
@@ -89,6 +90,16 @@ func CreateInstance(appName string, apiVersion uint32, extensions []string) (Ins
 		pinner.Pin(&names[0])
 		info.EnabledExtensionCount = uint32(len(names))
 		info.PPEnabledExtensionNames = &names[0]
+	}
+	if len(layers) > 0 {
+		names := make([]*byte, len(layers))
+		for i, l := range layers {
+			names[i] = cstr(l)
+			pinner.Pin(names[i])
+		}
+		pinner.Pin(&names[0])
+		info.EnabledLayerCount = uint32(len(names))
+		info.PPEnabledLayerNames = &names[0]
 	}
 	pinner.Pin(info)
 

@@ -90,6 +90,8 @@ func TestStructsMatchHeader(t *testing.T) {
 		"VkGraphicsPipelineCreateInfo":           GraphicsPipelineCreateInfo{},
 		"VkRenderingAttachmentInfo":              RenderingAttachmentInfo{},
 		"VkRenderingInfo":                        RenderingInfo{},
+		"VkDebugUtilsMessengerCreateInfoEXT":     DebugUtilsMessengerCreateInfoEXT{},
+		"VkDebugUtilsMessengerCallbackDataEXT":   DebugUtilsMessengerCallbackDataEXT{},
 	} {
 		start := strings.Index(h, "typedef struct "+c+" {")
 		if start < 0 {
@@ -165,6 +167,8 @@ func TestStructureTypesMatchHeader(t *testing.T) {
 		"VK_STRUCTURE_TYPE_RENDERING_INFO":                            StructureTypeRenderingInfo,
 		"VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO":                 StructureTypeRenderingAttachmentInfo,
 		"VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO":            StructureTypePipelineRenderingCreateInfo,
+		"VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT":     StructureTypeDebugUtilsMessengerCreateInfoEXT,
+		"VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT":   StructureTypeDebugUtilsMessengerCallbackDataEXT,
 	} {
 		m := regexp.MustCompile(`\b` + c + ` = (\d+),`).FindStringSubmatch(h)
 		if m == nil {
@@ -183,6 +187,10 @@ func TestConstantsMatchHeader(t *testing.T) {
 	h := vulkanHeader(t)
 	for c, v := range map[string]uint64{
 		"VK_FORMAT_R8G8B8A8_UNORM":                        uint64(FormatR8G8B8A8Unorm),
+		"VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT": DebugUtilsMessageSeverityWarningBitEXT,
+		"VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT":   DebugUtilsMessageSeverityErrorBitEXT,
+		"VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT":  DebugUtilsMessageTypeValidationBitEXT,
+		"VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT":     DebugUtilsMessageTypeGeneralBitEXT,
 		"VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL":        uint64(ImageLayoutColorAttachmentOptimal),
 		"VK_IMAGE_VIEW_TYPE_2D":                           uint64(ImageViewType2D),
 		"VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST":             uint64(PrimitiveTopologyTriangleList),

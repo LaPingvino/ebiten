@@ -19,11 +19,23 @@ package vk_test
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
 	"github.com/hajimehoshi/ebiten/v2/internal/shaderir/spirv"
 )
+
+// expected are messages a test provokes on purpose (by substring): logged,
+// not failures.
+var expected sync.Map // *testing.T → []string
+
+// expectValidation marks messages containing s as expected in t.
+func expectValidation(t *testing.T, s string) {
+	v, _ := expected.LoadOrStore(t, []string{})
+	expected.Store(t, append(v.([]string), s))
+	t.Cleanup(func() { expected.Delete(t) })
+}
 
 // testInstance is a Vulkan 1.3 instance and its first device with a
 // graphics queue, or a skip where there is none.
@@ -32,7 +44,14 @@ func testInstance(t *testing.T) (vk.Instance, vk.PhysicalDevice, uint32) {
 	if v, err := vk.EnumerateInstanceVersion(); err != nil || v < vk.APIVersion13 {
 		t.Skipf("no Vulkan 1.3 loader (%v)", err)
 	}
-	instance, err := vk.CreateInstance("ebitengine-test", vk.APIVersion13, nil)
+	// The validation layer, where installed: every error it reports fails
+	// the test (warnings are logged).
+	validating := true
+	instance, err := vk.CreateInstance("ebitengine-test", vk.APIVersion13, []string{vk.ExtDebugUtils}, []string{vk.LayerKhronosValidation})
+	if errors.Is(err, vk.ErrorLayerNotPresent) || errors.Is(err, vk.ErrorExtensionNotPresent) {
+		validating = false
+		instance, err = vk.CreateInstance("ebitengine-test", vk.APIVersion13, nil, nil)
+	}
 	if errors.Is(err, vk.ErrorIncompatibleDriver) {
 		t.Skip("no Vulkan 1.3 driver installed")
 	}
@@ -40,6 +59,32 @@ func testInstance(t *testing.T) (vk.Instance, vk.PhysicalDevice, uint32) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { vk.DestroyInstance(instance) })
+	if validating {
+		m, err := vk.CreateDebugUtilsMessenger(instance,
+			vk.DebugUtilsMessageSeverityWarningBitEXT|vk.DebugUtilsMessageSeverityErrorBitEXT,
+			vk.DebugUtilsMessageTypeGeneralBitEXT|vk.DebugUtilsMessageTypeValidationBitEXT|vk.DebugUtilsMessageTypePerformanceBitEXT,
+			func(m vk.DebugMessage) {
+				if v, ok := expected.Load(t); ok {
+					for _, s := range v.([]string) {
+						if strings.Contains(m.Text, s) {
+							t.Logf("validation (expected): %s", m.Text)
+							return
+						}
+					}
+				}
+				if m.Severity&vk.DebugUtilsMessageSeverityErrorBitEXT != 0 {
+					t.Errorf("validation: %s: %s", m.ID, m.Text)
+				} else {
+					t.Logf("validation warning: %s: %s", m.ID, m.Text)
+				}
+			})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { vk.DestroyDebugUtilsMessenger(instance, m) }) // before the instance (cleanups run last-first)
+	} else {
+		t.Log("no validation layer installed: tests run without it")
+	}
 	devices, err := vk.EnumeratePhysicalDevices(instance)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +131,8 @@ func TestDevice(t *testing.T) {
 // An unknown device extension is refused with VK_ERROR_EXTENSION_NOT_PRESENT.
 func TestDeviceMissingExtension(t *testing.T) {
 	instance, physical, family := testInstance(t)
+	expectValidation(t, "VK_EBITENGINE_no_such_extension")
+	expectValidation(t, "Failed to validate extensions")
 	_, err := vk.CreateDevice(instance, physical, family, nil, []string{"VK_EBITENGINE_no_such_extension"})
 	if !errors.Is(err, vk.ErrorExtensionNotPresent) {
 		t.Fatalf("got %v, want VK_ERROR_EXTENSION_NOT_PRESENT", err)

@@ -36,7 +36,7 @@ func TestInstance(t *testing.T) {
 		t.Skipf("the loader offers Vulkan %d.%d; the driver needs 1.3", vk.VersionMajor(v), vk.VersionMinor(v))
 	}
 
-	instance, err := vk.CreateInstance("ebitengine-test", vk.APIVersion13, nil)
+	instance, err := vk.CreateInstance("ebitengine-test", vk.APIVersion13, nil, nil)
 	if errors.Is(err, vk.ErrorIncompatibleDriver) {
 		t.Skip("no Vulkan 1.3 driver installed")
 	}
@@ -75,7 +75,7 @@ func TestInstanceMissingExtension(t *testing.T) {
 	if _, err := vk.EnumerateInstanceVersion(); err != nil {
 		t.Skipf("no Vulkan loader: %v", err)
 	}
-	_, err := vk.CreateInstance("ebitengine-test", vk.APIVersion13, []string{"VK_EBITENGINE_no_such_extension"})
+	_, err := vk.CreateInstance("ebitengine-test", vk.APIVersion13, []string{"VK_EBITENGINE_no_such_extension"}, nil)
 	if !errors.Is(err, vk.ErrorExtensionNotPresent) && !errors.Is(err, vk.ErrorIncompatibleDriver) {
 		t.Fatalf("got %v, want VK_ERROR_EXTENSION_NOT_PRESENT", err)
 	}
