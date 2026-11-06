@@ -51,13 +51,15 @@ type compiler struct {
 	result   uint32 // the fragment function's output (Location 0): where a returned value goes; 0 in the vertex function
 	inFunc   bool   // compiling a user function: a returned value is OpReturnValue
 	funcs    map[int]uint32
+	textures map[int]uint32 // texture i's combined image sampler (set 0, binding 1 + i), made on first use
+	texList  []uint32       // the same, in order of use: for the entry point's interface
 }
 
 func newCompiler(p *shaderir.Program) *compiler {
 	m := NewModule()
 	m.Capability(CapabilityShader)
 	m.MemoryModel(AddressingLogical, MemoryModelGLSL450)
-	return &compiler{m: m, p: p, vars: map[int]variable{}, types: map[shaderir.BasicType]uint32{}, funcs: map[int]uint32{}}
+	return &compiler{m: m, p: p, vars: map[int]variable{}, types: map[shaderir.BasicType]uint32{}, funcs: map[int]uint32{}, textures: map[int]uint32{}}
 }
 
 // typ is a shaderir type as a SPIR-V type (arrays and structs: not here —
@@ -197,7 +199,7 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 	if bodyErr != nil {
 		return nil, bodyErr
 	}
-	c.m.EntryPoint(ExecutionModelVertex, main, "main", interfaces...)
+	c.m.EntryPoint(ExecutionModelVertex, main, "main", append(interfaces, c.texList...)...)
 	return c.m.Words(), nil
 }
 
@@ -265,6 +267,8 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			return value{}, err
 		}
 		return value{f.Load(st, v.ptr), v.typ}, nil
+	case shaderir.TextureVariable: // the variable itself: __texelAt loads it
+		return value{c.texture(e.Index), shaderir.Type{Main: shaderir.Texture}}, nil
 	case shaderir.UniformVariable:
 		if e.Index >= len(c.p.Uniforms) {
 			return value{}, fmt.Errorf("spirv: unknown uniform %d", e.Index)
@@ -283,6 +287,9 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		}
 		if callee.Type != shaderir.BuiltinFuncExpr {
 			return value{}, fmt.Errorf("spirv: calls of expression type %d not supported yet", callee.Type)
+		}
+		if callee.BuiltinFunc == shaderir.TexelAt {
+			return c.texelAt(f, e.Exprs[1:])
 		}
 		var t shaderir.Type
 		switch callee.BuiltinFunc {
@@ -388,7 +395,7 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 	if bodyErr != nil {
 		return nil, bodyErr
 	}
-	c.m.EntryPoint(ExecutionModelFragment, main, "main", interfaces...)
+	c.m.EntryPoint(ExecutionModelFragment, main, "main", append(interfaces, c.texList...)...)
 	c.m.ExecutionMode(main, ExecutionModeOriginUpperLeft)
 	return c.m.Words(), nil
 }
@@ -599,4 +606,44 @@ func (c *compiler) callUser(f *Function, idx int, args []shaderir.Expr) (value, 
 		ret, _ = c.typ(fn.Return)
 	}
 	return value{f.Call(ret, id, ids...), fn.Return}, nil
+}
+
+// texture is texture i's combined image sampler variable (UniformConstant;
+// set 0, binding 1 + i — the uniform block is binding 0), made on first use.
+func (c *compiler) texture(i int) uint32 {
+	if v, ok := c.textures[i]; ok {
+		return v
+	}
+	simg := c.m.TypeSampledImage(c.m.TypeImage2D())
+	v := c.m.Variable(c.m.TypePointer(StorageClassUniformConstant, simg), StorageClassUniformConstant)
+	c.m.Decorate(v, DecorationDescriptorSet, 0)
+	c.m.Decorate(v, DecorationBinding, uint32(1+i))
+	c.textures[i] = v
+	c.texList = append(c.texList, v)
+	return v
+}
+
+// texelAt is __texelAt(texture, position): the texel at floor(position) in
+// pixels — sampled through Ebitengine's texel sampler (unnormalized,
+// nearest, transparent outside; vk.CreateTexelSampler) at LOD 0, the
+// position floored first as the GLSL and Metal backends do (a negative
+// position is then outside, not rounded in).
+func (c *compiler) texelAt(f *Function, args []shaderir.Expr) (value, error) {
+	if len(args) != 2 || args[0].Type != shaderir.TextureVariable {
+		return value{}, fmt.Errorf("spirv: __texelAt takes a texture variable and a position")
+	}
+	pos, err := c.expr(f, args[1])
+	if err != nil {
+		return value{}, err
+	}
+	if pos.typ.Main != shaderir.Vec2 {
+		return value{}, fmt.Errorf("spirv: __texelAt at a %s", pos.typ.String())
+	}
+	vec2, _ := c.typ(pos.typ)
+	vec4 := shaderir.Type{Main: shaderir.Vec4}
+	vt, _ := c.typ(vec4)
+	simg := c.m.TypeSampledImage(c.m.TypeImage2D())
+	img := f.Load(simg, c.texture(args[0].Index))
+	floored := f.GLSL(vec2, GLSLFloor, pos.id)
+	return value{f.ImageSampleExplicitLod(vt, img, floored, c.m.ConstantFloat32(0)), vec4}, nil
 }

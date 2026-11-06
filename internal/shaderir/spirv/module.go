@@ -49,6 +49,8 @@ const (
 	opTypeImage              = 25
 	opTypeSampledImage       = 27
 	opVectorShuffle          = 79
+	opExtInstImport          = 11
+	opExtInst                = 12
 	opImageSampleExplicitLod = 88
 	opTypeStruct             = 30
 	opTypePointer            = 32
@@ -121,10 +123,12 @@ const (
 type Module struct {
 	bound uint32 // the next ID
 
-	capabilities, memoryModel, entryPoints, executionModes []uint32
+	capabilities, extInstImports, memoryModel, entryPoints []uint32
+	executionModes                                         []uint32
 	debug, annotations, types, functions                   []uint32
 
 	typeIDs map[string]uint32 // types written once
+	glsl    uint32            // the GLSL.std.450 import (0: not yet)
 }
 
 // NewModule is an empty module.
@@ -446,13 +450,33 @@ func (f *Function) ImageSampleExplicitLod(typ, sampledImage, coord, lod uint32) 
 	return f.op(opImageSampleExplicitLod, typ, sampledImage, coord, 0x2, lod)
 }
 
+// GLSL.std.450 instruction numbers (the extended instructions used).
+const (
+	GLSLFloor = 8
+)
+
+// GLSLStd450 is the GLSL.std.450 extended instruction set's import, made on
+// first use.
+func (m *Module) GLSLStd450() uint32 {
+	if m.glsl == 0 {
+		m.glsl = m.ID()
+		inst(&m.extInstImports, opExtInstImport, append([]uint32{m.glsl}, str("GLSL.std.450")...)...)
+	}
+	return m.glsl
+}
+
+// GLSL is an OpExtInst of GLSL.std.450 (GLSLFloor …) on the operands.
+func (f *Function) GLSL(typ, instruction uint32, operands ...uint32) uint32 {
+	return f.op(opExtInst, typ, append([]uint32{f.m.GLSLStd450(), instruction}, operands...)...)
+}
+
 // Return ends a block, returning nothing.
 func (f *Function) Return() { inst(&f.m.functions, opReturn) }
 
 // Words is the module: the header, then the sections in layout order.
 func (m *Module) Words() []uint32 {
 	return slices.Concat([]uint32{magic, version, 0, m.bound, 0},
-		m.capabilities, m.memoryModel, m.entryPoints, m.executionModes, m.debug, m.annotations, m.types, m.functions)
+		m.capabilities, m.extInstImports, m.memoryModel, m.entryPoints, m.executionModes, m.debug, m.annotations, m.types, m.functions)
 }
 
 // Bytes is the module as little-endian bytes (what a .spv file and

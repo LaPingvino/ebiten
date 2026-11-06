@@ -1330,3 +1330,60 @@ func TestTexelSampling(t *testing.T) {
 		}
 	}
 }
+
+// Ebitengine's nearest-filter built-in shader (imageSrc0UnsafeAt × colour)
+// from Kage, both stages compiled by the SPIR-V backend, drawing a 2×2
+// texture onto a 4×2 target: the source position equals the destination
+// (pixels), the colour white — the left half is the texture texel for texel,
+// the right half (outside the source) transparent.
+func TestKageNearestBuiltin(t *testing.T) {
+	p, err := graphics.CompileShader([]byte("//kage:unit pixels\npackage main\nfunc Fragment(dstPos vec4, src0Pos vec2, color vec4) vec4 {\n\tclr := imageSrc0UnsafeAt(src0Pos)\n\tclr *= color\n\treturn clr\n}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vsWords, err := spirv.CompileVertex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsWords, err := spirv.CompileFragment(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const w, h = 4, 2
+	src := make([]uint32, 46)
+	for i, f := range []float32{2.0 / w, 0, 0, 0, 0, 2.0 / h, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1} {
+		src[30+i] = math.Float32bits(f)
+	}
+	packed, err := spirv.PackStd140(nil, p.Uniforms, src, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uniforms := make([]float32, len(packed))
+	for i, x := range packed {
+		uniforms[i] = math.Float32frombits(x)
+	}
+	tex := []byte{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255}
+	px := drawScene(t, w, h, func(device *vk.Device) scene {
+		vs, err := device.CreateShaderModule(vsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := device.CreateShaderModule(fsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := func(x, y float32) []float32 { return []float32{x, y, x, y, 1, 1, 1, 1, 0, 0, 0, 0} } // src = dst
+		verts := slices.Concat(v(0, 0), v(w, 0), v(0, h), v(w, h))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+			uniforms: uniforms, uniformRange: uint64(len(packed) * 4), texture: tex, texW: 2, texH: 2}
+	})
+	want := [][4]byte{
+		{255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 0, 0}, {0, 0, 0, 0},
+		{0, 0, 255, 255}, {255, 255, 255, 255}, {0, 0, 0, 0}, {0, 0, 0, 0},
+	}
+	for i, wt := range want {
+		if got := [4]byte(px[i*4 : i*4+4]); got != wt {
+			t.Errorf("pixel %d,%d: %v, want %v", i%w, i/w, got, wt)
+		}
+	}
+}
