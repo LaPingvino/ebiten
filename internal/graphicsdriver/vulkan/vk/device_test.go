@@ -1680,3 +1680,48 @@ func drawKage(t *testing.T, p *shaderir.Program, w, h int) []byte {
 			uniforms: uniforms, uniformRange: uint64(len(packed) * 4)}
 	})
 }
+
+// Local arrays from Kage: a [3]float filled and summed in a loop with a
+// dynamic index; a sibling block's array reusing a local index (each block
+// keeps its own variable); a vector element assigned by index — every pixel
+// (0.25, 0.5, 0.4375, 1).
+func TestKageArrays(t *testing.T) {
+	p, err := graphics.CompileShader([]byte(`//kage:unit pixels
+package main
+
+func Fragment(dst vec4, src vec2, color vec4) vec4 {
+	var a [3]float
+	a[0] = 0.25
+	a[1] = 0.5
+	a[2] = 1
+	s := 0.0
+	for i := 0; i < 3; i++ {
+		s += a[i]
+	}
+	{
+		var b [2]float
+		b[0] = 0.75
+		_ = b
+	}
+	var c [2]float
+	c[1] = 0.5
+	v := vec4(0, 0, 0, 1)
+	v[1] = c[1]
+	return vec4(a[0], v[1], s/4, 1)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	px := drawKage(t, p, 2, 1)
+	want := [4]int{64, 128, 112, 255}
+	for i := 0; i < 2; i++ {
+		got := px[i*4 : i*4+4]
+		for k := range want {
+			if d := int(got[k]) - want[k]; d < -1 || d > 1 {
+				t.Errorf("pixel %d: %v, want ≈ %v", i, got, want)
+				break
+			}
+		}
+	}
+}

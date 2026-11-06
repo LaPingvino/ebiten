@@ -52,9 +52,13 @@ type compiler struct {
 	inFunc   bool          // compiling a user function: a returned value is OpReturnValue
 	retType  shaderir.Type // the user function's return type (an untyped number returned takes it)
 	funcs    map[int]uint32
-	loops    [][2]uint32    // the enclosing loops' continue and merge labels (innermost last): continue / break
-	textures map[int]uint32 // texture i's combined image sampler (set 0, binding 1 + i), made on first use
-	texList  []uint32       // the same, in order of use: for the entry point's interface
+	// blockVars are each nested block's own variables, by local index:
+	// indices are reused across sibling scopes, so a block's are mapped in
+	// only while its statements are compiled (stmts).
+	blockVars map[*shaderir.Block]map[int]variable
+	loops     [][2]uint32    // the enclosing loops' continue and merge labels (innermost last): continue / break
+	textures  map[int]uint32 // texture i's combined image sampler (set 0, binding 1 + i), made on first use
+	texList   []uint32       // the same, in order of use: for the entry point's interface
 }
 
 func newCompiler(p *shaderir.Program) *compiler {
@@ -83,6 +87,15 @@ func (c *compiler) typ(t shaderir.Type) (uint32, error) {
 	case shaderir.Mat2, shaderir.Mat3, shaderir.Mat4:
 		n := uint32(t.Main - shaderir.Mat2 + 2)
 		return m.TypeMatrix(m.TypeVector(f32, n), n), nil
+	case shaderir.Array: // a local array (the uniform block's have their strides: blockType)
+		if len(t.Sub) != 1 {
+			return 0, fmt.Errorf("spirv: an array type without its element type")
+		}
+		elem, err := c.typ(t.Sub[0])
+		if err != nil {
+			return 0, err
+		}
+		return m.TypeArrayPlain(elem, t.Length), nil
 	}
 	return 0, fmt.Errorf("spirv: type %s not supported yet", t.String())
 }
@@ -90,6 +103,9 @@ func (c *compiler) typ(t shaderir.Type) (uint32, error) {
 // blockType is a uniform's type inside the block: arrays with their std140
 // ArrayStride.
 func (c *compiler) blockType(t shaderir.Type) (uint32, error) {
+	if t.Main == shaderir.Bool { // a block can't hold a bool: an int (Ebitengine packs it as one dword), read as != 0
+		return c.m.TypeInt(32, true), nil
+	}
 	if t.Main != shaderir.Array {
 		return c.typ(t)
 	}
@@ -190,6 +206,9 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 	main := c.m.Function(void, c.m.TypeFunction(void), func(f *Function) {
 		f.Label()
 		for i, t := range block.LocalVars { // the function's own locals: first in the first block
+			if t.Main == shaderir.None { // a for loop's counter: the for declares it, with its type
+				continue
+			}
 			st, err := c.typ(t)
 			if err != nil {
 				bodyErr = err
@@ -198,6 +217,9 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 			c.vars[na+1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
 		}
 		if bodyErr = c.declareNested(f, block); bodyErr != nil {
+			return
+		}
+		if bodyErr = c.copyAssignedInputs(f, block); bodyErr != nil {
 			return
 		}
 		if bodyErr = c.block(f, block); bodyErr != nil {
@@ -249,7 +271,13 @@ func (c *compiler) declareNested(f *Function, b *shaderir.Block) error {
 				if err != nil {
 					return err
 				}
-				c.vars[bb.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+				if c.blockVars == nil {
+					c.blockVars = map[*shaderir.Block]map[int]variable{}
+				}
+				if c.blockVars[bb] == nil {
+					c.blockVars[bb] = map[int]variable{}
+				}
+				c.blockVars[bb][bb.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
 			}
 			if err := c.declareNested(f, bb); err != nil {
 				return err
@@ -262,12 +290,39 @@ func (c *compiler) declareNested(f *Function, b *shaderir.Block) error {
 // stmts writes a block's statements; ended reports that the block was
 // closed (by a return), so nothing may follow in it.
 func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error) {
+	if own := c.blockVars[b]; len(own) > 0 { // this block's variables over the outer ones of the same index
+		saved := map[int]variable{}
+		absent := map[int]bool{}
+		for i, v := range own {
+			if old, ok := c.vars[i]; ok {
+				saved[i] = old
+			} else {
+				absent[i] = true
+			}
+			c.vars[i] = v
+		}
+		defer func() {
+			for i := range own {
+				if absent[i] {
+					delete(c.vars, i)
+				} else {
+					c.vars[i] = saved[i]
+				}
+			}
+		}()
+	}
 	for _, s := range b.Stmts {
 		switch s.Type {
 		case shaderir.Assign:
 			lhs := s.Exprs[0]
 			if lhs.Type == shaderir.FieldSelector {
 				if err := c.assignField(f, lhs, s.Exprs[1]); err != nil {
+					return false, err
+				}
+				continue
+			}
+			if lhs.Type == shaderir.Index {
+				if err := c.assignIndex(f, lhs, s.Exprs[1]); err != nil {
 					return false, err
 				}
 				continue
@@ -509,6 +564,12 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			return value{}, fmt.Errorf("spirv: unknown uniform %d", e.Index)
 		}
 		t := c.p.Uniforms[e.Index]
+		if t.Main == shaderir.Bool {
+			i32 := c.m.TypeInt(32, true)
+			ptr := f.AccessChain(c.m.TypePointer(StorageClassUniform, i32), c.uniforms, c.m.ConstantInt32(int32(e.Index)))
+			b, _ := c.typ(t)
+			return value{f.op(opINotEqual, b, f.Load(i32, ptr), c.m.ConstantInt32(0)), t}, nil
+		}
 		st, err := c.typ(t)
 		if err != nil {
 			return value{}, err
@@ -528,6 +589,14 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		}
 		if v, ok, err := c.mathBuiltin(f, callee.BuiltinFunc, e.Exprs[1:]); ok || err != nil {
 			return v, err
+		}
+		if callee.BuiltinFunc == shaderir.Len && len(e.Exprs) == 2 { // len(array): its length, a constant
+			if a := e.Exprs[1]; a.Type == shaderir.LocalVariable {
+				if v, ok := c.vars[a.Index]; ok && v.typ.Main == shaderir.Array {
+					return value{c.m.ConstantInt32(int32(v.typ.Length)), shaderir.Type{Main: shaderir.Int}}, nil
+				}
+			}
+			return value{}, fmt.Errorf("spirv: len of this expression not supported yet")
 		}
 		if (callee.BuiltinFunc == shaderir.FloatF || callee.BuiltinFunc == shaderir.IntF) && len(e.Exprs) == 2 {
 			return c.convert(f, callee.BuiltinFunc, e.Exprs[1])
@@ -675,6 +744,9 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 			c.vars[1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
 		}
 		if bodyErr = c.declareNested(f, block); bodyErr != nil {
+			return
+		}
+		if bodyErr = c.copyAssignedInputs(f, block); bodyErr != nil {
 			return
 		}
 		bodyErr = c.block(f, block)
@@ -1143,6 +1215,16 @@ func (c *compiler) index(f *Function, e shaderir.Expr) (value, error) {
 		ptr := f.AccessChain(c.m.TypePointer(StorageClassUniform, st), c.uniforms, c.m.ConstantInt32(int32(base.Index)), i.id)
 		return value{f.Load(st, ptr), et}, nil
 	}
+	if base.Type == shaderir.LocalVariable {
+		if v, ok := c.vars[base.Index]; ok && v.typ.Main == shaderir.Array {
+			ptr, et, err := c.elementPtr(f, v, ix)
+			if err != nil {
+				return value{}, err
+			}
+			st, _ := c.typ(et)
+			return value{f.Load(st, ptr), et}, nil
+		}
+	}
 	v, err := c.expr(f, base)
 	if err != nil {
 		return value{}, err
@@ -1425,4 +1507,132 @@ func (c *compiler) matrixConstructor(f *Function, fn shaderir.BuiltinFunc, args 
 		cols[i] = f.CompositeConstruct(ct, flat[i*n:i*n+n]...)
 	}
 	return value{f.CompositeConstruct(mtt, cols...), mt}, nil
+}
+
+// elementPtr is a pointer to element ix of a local array variable (the
+// index an int: a bare number becomes an int constant).
+func (c *compiler) elementPtr(f *Function, v variable, ix shaderir.Expr) (uint32, shaderir.Type, error) {
+	et := v.typ.Sub[0]
+	st, err := c.typ(et)
+	if err != nil {
+		return 0, et, err
+	}
+	var idx uint32
+	if ix.Type == shaderir.NumberExpr {
+		n, _ := constant.Int64Val(constant.ToInt(ix.Const))
+		idx = c.m.ConstantInt32(int32(n))
+	} else {
+		i, err := c.expr(f, ix)
+		if err != nil {
+			return 0, et, err
+		}
+		if i.typ.Main != shaderir.Int {
+			return 0, et, fmt.Errorf("spirv: an array index of type %s", i.typ.String())
+		}
+		idx = i.id
+	}
+	return f.AccessChain(c.m.TypePointer(v.storage, st), v.ptr, idx), et, nil
+}
+
+// assignIndex is a[i] = e for a local array.
+func (c *compiler) assignIndex(f *Function, lhs, rhsExpr shaderir.Expr) error {
+	base := lhs.Exprs[0]
+	if base.Type != shaderir.LocalVariable {
+		return fmt.Errorf("spirv: assignment to an index of expression type %d not supported yet", base.Type)
+	}
+	v, ok := c.vars[base.Index]
+	if !ok || v.input {
+		return fmt.Errorf("spirv: assignment to an index of local %d (unknown or an input) not supported yet", base.Index)
+	}
+	var ptr uint32
+	var et shaderir.Type
+	var err error
+	switch {
+	case v.typ.Main == shaderir.Array:
+		if ptr, et, err = c.elementPtr(f, v, lhs.Exprs[1]); err != nil {
+			return err
+		}
+	case (isFloatish(v.typ) || isIntish(v.typ)) && v.typ.DwordCount() > 1: // v[i] of a vector: that component
+		et = shaderir.Type{Main: shaderir.Float}
+		if isIntish(v.typ) {
+			et = shaderir.Type{Main: shaderir.Int}
+		}
+		st, _ := c.typ(et)
+		var idx uint32
+		if ix := lhs.Exprs[1]; ix.Type == shaderir.NumberExpr {
+			n, _ := constant.Int64Val(constant.ToInt(ix.Const))
+			idx = c.m.ConstantInt32(int32(n))
+		} else {
+			i, err := c.expr(f, ix)
+			if err != nil {
+				return err
+			}
+			idx = i.id
+		}
+		ptr = f.AccessChain(c.m.TypePointer(v.storage, st), v.ptr, idx)
+	default:
+		return fmt.Errorf("spirv: assignment to an index of a %s not supported yet", v.typ.String())
+	}
+	var rhs value
+	if rhsExpr.Type == shaderir.NumberExpr && (et.Main == shaderir.Int || et.Main == shaderir.Float) {
+		id, err := c.forConst(et, rhsExpr.Const)
+		if err != nil {
+			return err
+		}
+		rhs = value{id, et}
+	} else if rhs, err = c.expr(f, rhsExpr); err != nil {
+		return err
+	}
+	f.Store(ptr, rhs.id)
+	return nil
+}
+
+// copyAssignedInputs gives each stage input the body assigns (dstPos -= …,
+// src0Pos.x = 0) a Function variable holding its value — Input variables
+// can't be written — and reads and writes it there from then on. The
+// variables are made first (they must open the block), then filled.
+func (c *compiler) copyAssignedInputs(f *Function, block *shaderir.Block) error {
+	assigned := map[int]bool{}
+	var walk func(b *shaderir.Block)
+	walk = func(b *shaderir.Block) {
+		for _, s := range b.Stmts {
+			if s.Type == shaderir.Assign && len(s.Exprs) > 0 {
+				lhs := s.Exprs[0]
+				for lhs.Type == shaderir.FieldSelector || lhs.Type == shaderir.Index {
+					lhs = lhs.Exprs[0]
+				}
+				if lhs.Type == shaderir.LocalVariable {
+					if v, ok := c.vars[lhs.Index]; ok && v.input {
+						assigned[lhs.Index] = true
+					}
+				}
+			}
+			for _, bb := range s.Blocks {
+				if bb != nil {
+					walk(bb)
+				}
+			}
+		}
+	}
+	walk(block)
+	type copyOf struct {
+		index int
+		in    variable
+		ptr   uint32
+		st    uint32
+	}
+	var copies []copyOf
+	for i := range assigned {
+		in := c.vars[i]
+		st, err := c.typ(in.typ)
+		if err != nil {
+			return err
+		}
+		copies = append(copies, copyOf{i, in, f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), st})
+	}
+	for _, cp := range copies {
+		f.Store(cp.ptr, f.Load(cp.st, cp.in.ptr))
+		c.vars[cp.index] = variable{ptr: cp.ptr, typ: cp.in.typ, storage: StorageClassFunction}
+	}
+	return nil
 }

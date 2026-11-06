@@ -306,6 +306,14 @@ func (m *Module) TypeArray(element uint32, n int) uint32 {
 	return id
 }
 
+// TypeArrayPlain is OpTypeArray of n elements without layout decorations —
+// for Function variables (Vulkan forbids ArrayStride there); one per element
+// type and length.
+func (m *Module) TypeArrayPlain(element uint32, n int) uint32 {
+	length := m.ConstantUint32(uint32(n))
+	return m.typeID(key("arr", element, uint32(n)), func(id uint32) { inst(&m.types, opTypeArray, id, element, length) })
+}
+
 // TypeStruct is OpTypeStruct of the members — a new type each call, since
 // its decorations (Block, member offsets) belong to that one.
 func (m *Module) TypeStruct(members ...uint32) uint32 {
