@@ -57,6 +57,7 @@ const (
 	PipelineStageColorAttachmentOutputBit uint32        = 0x400
 	SuboptimalKHR                         Result        = 1000001003
 	ErrorOutOfDateKHR                     Result        = -1000001004
+	ErrorSurfaceLostKHR                   Result        = -1000000000
 )
 
 // XlibSurfaceCreateInfoKHR is VkXlibSurfaceCreateInfoKHR.

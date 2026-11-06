@@ -100,6 +100,13 @@ loop body's on every iteration — Kage's declarations zero as Go's; leaving the
 on lavapipe), the maths through `GLSL.std.450` (variadic `min` / `max` folded pairwise), short-circuit `&&` /
 `||` as real control flow (§6).
 
+**Device loss** (`VK_ERROR_DEVICE_LOST` from a submit, a fence wait or a present) is reported, explained,
+and ends the game — as on the desktop OpenGL and DirectX drivers. Ebitengine's way back (`Resetter`, then
+the atlas restoring every image) is built for a mobile app's pause: the images are read back *before* the
+context goes. A sudden loss leaves nothing to restore from, and Ebitengine keeps no CPU copies of its images,
+so recreating the device alone would bring back a blank game. (The plan here first said "recreate the device
+through `Resetter`"; looking at what the atlas needs showed why not.)
+
 **Validation** is a switch: `EBITENGINE_VULKAN_VALIDATION=1` turns on the Khronos layer for any game or test,
 its messages on stderr; the driver's own tests turn it on themselves and fail on its errors.
 
@@ -124,6 +131,6 @@ its messages on stderr; the driver's own tests turn it on themselves and fail on
 2. `spirv`: types, constants, expressions, control flow, the built-ins — validated as it grew. **Done.**
 3. The driver, offscreen: images, `WritePixels`, `DrawTriangles`, read-backs — Ebitengine's tests. **Done.**
 4. The screen: surface, swapchain, present, vsync, resize. **Done.**
-5. Still open: device loss (`VK_ERROR_DEVICE_LOST` → `Resetter`, recreating the device; not handled yet),
-   merging draws to one destination into one rendering pass, a suballocator for images, and frame times
-   against OpenGL on a real GPU.
+5. Device loss: reported and explained (see Decisions — recovering needs saved images Ebitengine doesn't
+   keep). Still open: merging draws to one destination into one rendering pass, a suballocator for images,
+   and frame times against OpenGL on a real GPU.

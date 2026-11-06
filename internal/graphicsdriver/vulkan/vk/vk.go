@@ -56,6 +56,16 @@ func (r Result) Error() string {
 		return "vk: VK_ERROR_EXTENSION_NOT_PRESENT"
 	case ErrorIncompatibleDriver:
 		return "vk: VK_ERROR_INCOMPATIBLE_DRIVER"
+	case NotReady:
+		return "vk: VK_NOT_READY"
+	case Timeout:
+		return "vk: VK_TIMEOUT"
+	case SuboptimalKHR:
+		return "vk: VK_SUBOPTIMAL_KHR"
+	case ErrorOutOfDateKHR:
+		return "vk: VK_ERROR_OUT_OF_DATE_KHR"
+	case ErrorSurfaceLostKHR:
+		return "vk: VK_ERROR_SURFACE_LOST_KHR"
 	}
 	return fmt.Sprintf("vk: VkResult %d", int32(r))
 }

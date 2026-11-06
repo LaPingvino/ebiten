@@ -279,10 +279,10 @@ func (g *Graphics) flush() error {
 	g.recording = false
 	b := &g.batches[g.cur]
 	if err := g.device.EndCommandBuffer(b.cb); err != nil {
-		return fmt.Errorf("vulkan: %w", err)
+		return deviceError(err)
 	}
 	if err := g.device.QueueSubmitSync(g.queue, b.fence, g.submitWait, g.submitWaitStage, g.submitSignal, b.cb); err != nil {
-		return fmt.Errorf("vulkan: %w", err)
+		return deviceError(err)
 	}
 	b.serial, b.after, b.inFlight = g.serial, g.afterBatch, true
 	g.afterBatch = nil
@@ -294,7 +294,7 @@ func (g *Graphics) flush() error {
 // retire waits for the batch's fence and releases what it used.
 func (g *Graphics) retire(b *batch) error {
 	if err := g.device.WaitForFence(b.fence); err != nil {
-		return fmt.Errorf("vulkan: %w", err)
+		return deviceError(err)
 	}
 	for _, f := range b.after {
 		f()
@@ -415,4 +415,15 @@ func (g *Graphics) freeHostBuffer(b *hostBuffer) {
 	g.device.UnmapMemory(b.mem)
 	g.device.DestroyBuffer(b.buf)
 	g.device.FreeMemory(b.mem)
+}
+
+// deviceError explains a lost device: Ebitengine restores its images only
+// after saving them first (a mobile app's pause), which a sudden loss on the
+// desktop doesn't allow — the error ends the game, as with the OpenGL and
+// DirectX drivers. Other errors pass through.
+func deviceError(err error) error {
+	if errors.Is(err, vk.ErrorDeviceLost) {
+		return fmt.Errorf("vulkan: the GPU device was lost (a driver reset or a GPU fault); its images can't be restored: %w", err)
+	}
+	return fmt.Errorf("vulkan: %w", err)
 }

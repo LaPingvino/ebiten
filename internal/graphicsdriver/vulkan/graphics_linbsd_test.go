@@ -18,6 +18,7 @@ package vulkan
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"strings"
 	"testing"
@@ -195,5 +196,22 @@ func TestReadPixelsAsyncOrder(t *testing.T) {
 	}
 	if got := read(t, img, image.Rect(0, 0, 2, 1)); !bytes.Equal(got, b) {
 		t.Errorf("then %v, want the second write %v", got, b)
+	}
+}
+
+// A lost device is reported, explained and still matchable (errors.Is); the
+// window-system results print by name.
+func TestDeviceError(t *testing.T) {
+	err := deviceError(vk.ErrorDeviceLost)
+	if !errors.Is(err, vk.ErrorDeviceLost) || !strings.Contains(err.Error(), "device was lost") {
+		t.Errorf("device lost: %v", err)
+	}
+	if err := deviceError(vk.ErrorOutOfDeviceMemory); !errors.Is(err, vk.ErrorOutOfDeviceMemory) || strings.Contains(err.Error(), "lost") {
+		t.Errorf("out of memory: %v", err)
+	}
+	for _, r := range []vk.Result{vk.NotReady, vk.Timeout, vk.SuboptimalKHR, vk.ErrorOutOfDateKHR, vk.ErrorSurfaceLostKHR} {
+		if strings.Contains(r.Error(), "VkResult") {
+			t.Errorf("%d has no name", int32(r))
+		}
 	}
 }

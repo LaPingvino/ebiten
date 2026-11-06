@@ -219,7 +219,7 @@ func (g *Graphics) present() error {
 			g.swapStale = true
 			return nil
 		}
-		return fmt.Errorf("vulkan: %w", err)
+		return deviceError(err)
 	}
 	return nil
 }
