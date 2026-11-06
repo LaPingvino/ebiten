@@ -49,6 +49,9 @@ const (
 	opTypeImage              = 25
 	opTypeSampledImage       = 27
 	opVectorShuffle          = 79
+	opConvertFToS            = 110
+	opLoopMerge              = 246
+	opUnreachable            = 255
 	opSelectionMerge         = 247
 	opBranch                 = 249
 	opBranchConditional      = 250
@@ -393,6 +396,13 @@ func (f *Function) Current() uint32 { return f.current }
 // SelectionMerge declares a structured selection's merge block (before its
 // conditional branch).
 func (f *Function) SelectionMerge(merge uint32) { inst(&f.m.functions, opSelectionMerge, merge, 0) }
+
+// LoopMerge declares a structured loop's merge and continue blocks (in its
+// header, before the branch).
+func (f *Function) LoopMerge(merge, cont uint32) { inst(&f.m.functions, opLoopMerge, merge, cont, 0) }
+
+// Unreachable ends a block control never reaches.
+func (f *Function) Unreachable() { inst(&f.m.functions, opUnreachable) }
 
 // Branch ends a block jumping to a label.
 func (f *Function) Branch(to uint32) { inst(&f.m.functions, opBranch, to) }

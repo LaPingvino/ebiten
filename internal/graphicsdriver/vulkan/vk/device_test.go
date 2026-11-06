@@ -1529,3 +1529,76 @@ func wordsBytes(w []uint32) []byte {
 	}
 	return b
 }
+
+// Loops from Kage: a float for loop with continue (at 3) and break (once the
+// counter passes the pixel's x), summing 0.1s into red; an int loop counting
+// to 4, as float(n) / 4 into green — per pixel of a 4×1 target red is 0.1,
+// 0.2, 0.3, 0.3 (pixel centres 0.5 … 3.5), green 1.
+func TestKageLoops(t *testing.T) {
+	const w, h = 4, 1
+	p, err := graphics.CompileShader([]byte(`//kage:unit pixels
+package main
+
+func Fragment(dst vec4, src vec2, color vec4) vec4 {
+	sum := 0.0
+	for i := 0.0; i < 10.0; i += 1.0 {
+		if i == 3.0 {
+			continue
+		}
+		if i >= dst.x {
+			break
+		}
+		sum += 0.1
+	}
+	n := 0
+	for j := 0; j < 4; j++ {
+		n++
+	}
+	return vec4(sum, float(n)/4, 0, 1)
+}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	vsWords, err := spirv.CompileVertex(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsWords, err := spirv.CompileFragment(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spirvVal(t, wordsBytes(fsWords))
+	src := make([]uint32, 46)
+	for i, f := range []float32{2.0 / w, 0, 0, 0, 0, 2.0 / h, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1} {
+		src[30+i] = math.Float32bits(f)
+	}
+	packed, err := spirv.PackStd140(nil, p.Uniforms, src, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uniforms := make([]float32, len(packed))
+	for i, x := range packed {
+		uniforms[i] = math.Float32frombits(x)
+	}
+	px := drawScene(t, w, h, func(device *vk.Device) scene {
+		vs, err := device.CreateShaderModule(vsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs, err := device.CreateShaderModule(fsWords)
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0} }
+		verts := slices.Concat(v(0, 0), v(w, 0), v(0, h), v(w, h))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+			uniforms: uniforms, uniformRange: uint64(len(packed) * 4)}
+	})
+	for i, red := range []float64{0.1, 0.2, 0.3, 0.3} {
+		got := px[i*4 : i*4+4]
+		if d := int(got[0]) - int(math.Round(red*255)); d < -1 || d > 1 || got[1] != 255 || got[3] != 255 {
+			t.Errorf("pixel %d: %v, want red ≈ %d, green 255", i, got, int(math.Round(red*255)))
+		}
+	}
+}

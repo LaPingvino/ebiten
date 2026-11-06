@@ -58,7 +58,7 @@ func TestCompileVertexUnsupported(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.VertexFunc.Block.Stmts = append([]shaderir.Stmt{{Type: shaderir.For}}, p.VertexFunc.Block.Stmts...)
+	p.VertexFunc.Block.Stmts = append([]shaderir.Stmt{{Type: shaderir.StmtType(200)}}, p.VertexFunc.Block.Stmts...) // no such statement type
 	if _, err := spirv.CompileVertex(p); err == nil || !strings.Contains(err.Error(), "not supported yet") {
 		t.Errorf("an unknown statement: %v", err)
 	}

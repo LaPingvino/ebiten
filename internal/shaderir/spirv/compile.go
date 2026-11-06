@@ -51,6 +51,7 @@ type compiler struct {
 	result   uint32 // the fragment function's output (Location 0): where a returned value goes; 0 in the vertex function
 	inFunc   bool   // compiling a user function: a returned value is OpReturnValue
 	funcs    map[int]uint32
+	loops    [][2]uint32    // the enclosing loops' continue and merge labels (innermost last): continue / break
 	textures map[int]uint32 // texture i's combined image sampler (set 0, binding 1 + i), made on first use
 	texList  []uint32       // the same, in order of use: for the entry point's interface
 }
@@ -223,11 +224,23 @@ func (c *compiler) block(f *Function, b *shaderir.Block) error {
 // first block.
 func (c *compiler) declareNested(f *Function, b *shaderir.Block) error {
 	for _, s := range b.Stmts {
+		if s.Type == shaderir.For { // the loop's counter: declared by the for itself
+			if _, ok := c.vars[s.ForVarIndex]; !ok {
+				st, err := c.typ(s.ForVarType)
+				if err != nil {
+					return err
+				}
+				c.vars[s.ForVarIndex] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: s.ForVarType, storage: StorageClassFunction}
+			}
+		}
 		for _, bb := range s.Blocks {
 			if bb == nil {
 				continue
 			}
 			for i, t := range bb.LocalVars {
+				if t.Main == shaderir.None { // a for loop's counter: the for declares it, with its type
+					continue
+				}
 				st, err := c.typ(t)
 				if err != nil {
 					return err
@@ -256,7 +269,15 @@ func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error)
 			if !ok || v.input {
 				return false, fmt.Errorf("spirv: assignment to local %d (an attribute or unknown) not supported yet", lhs.Index)
 			}
-			rhs, err := c.expr(f, s.Exprs[1])
+			var rhs value
+			var err error
+			if s.Exprs[1].Type == shaderir.NumberExpr && (v.typ.Main == shaderir.Int || v.typ.Main == shaderir.Float) {
+				var id uint32 // an untyped number takes the variable's type (n := 0)
+				id, err = c.forConst(v.typ, s.Exprs[1].Const)
+				rhs = value{id, v.typ}
+			} else {
+				rhs, err = c.expr(f, s.Exprs[1])
+			}
 			if err != nil {
 				return false, err
 			}
@@ -289,6 +310,21 @@ func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error)
 			if ended, err := c.ifStmt(f, s); err != nil || ended {
 				return ended, err
 			}
+		case shaderir.For:
+			if err := c.forStmt(f, s); err != nil {
+				return false, err
+			}
+		case shaderir.Continue, shaderir.Break:
+			if len(c.loops) == 0 {
+				return false, fmt.Errorf("spirv: continue / break outside a loop")
+			}
+			l := c.loops[len(c.loops)-1]
+			if s.Type == shaderir.Continue {
+				f.Branch(l[0])
+			} else {
+				f.Branch(l[1])
+			}
+			return true, nil
 		default:
 			return false, fmt.Errorf("spirv: statement type %d not supported yet", s.Type)
 		}
@@ -335,10 +371,82 @@ func (c *compiler) ifStmt(f *Function, s shaderir.Stmt) (bool, error) {
 	}
 	f.LabelAt(mergeL)
 	if thenEnded && elseEnded {
-		f.Return() // the merge block can't be reached; it still needs an end
+		f.Unreachable() // the merge block can't be reached; it still needs an end
 		return true, nil
 	}
 	return false, nil
+}
+
+// forConst is a for loop's constant in the counter's type.
+func (c *compiler) forConst(t shaderir.Type, v constant.Value) (uint32, error) {
+	switch t.Main {
+	case shaderir.Int:
+		n, _ := constant.Int64Val(constant.ToInt(v))
+		return c.m.ConstantInt32(int32(n)), nil
+	case shaderir.Float:
+		x, _ := constant.Float32Val(constant.ToFloat(v))
+		return c.m.ConstantFloat32(x), nil
+	}
+	return 0, fmt.Errorf("spirv: a for loop over %s", t.String())
+}
+
+// forStmt is Kage's for loop (counter := init; counter op end; counter +=
+// delta) as a structured loop: the counter set, a header (OpLoopMerge, to the
+// condition block), the condition (the body or the merge), the body (to the
+// continue block unless it ended), the continue block (the step, back to the
+// header), the merge.
+func (c *compiler) forStmt(f *Function, s shaderir.Stmt) error {
+	v, ok := c.vars[s.ForVarIndex]
+	if !ok {
+		return fmt.Errorf("spirv: the for loop's counter %d undeclared", s.ForVarIndex)
+	}
+	initC, err := c.forConst(s.ForVarType, s.ForInit)
+	if err != nil {
+		return err
+	}
+	endC, err := c.forConst(s.ForVarType, s.ForEnd)
+	if err != nil {
+		return err
+	}
+	deltaC, err := c.forConst(s.ForVarType, s.ForDelta)
+	if err != nil {
+		return err
+	}
+	st, _ := c.typ(s.ForVarType)
+	f.Store(v.ptr, initC)
+	header, condL, bodyL, contL, mergeL := c.m.ID(), c.m.ID(), c.m.ID(), c.m.ID(), c.m.ID()
+	f.Branch(header)
+	f.LabelAt(header)
+	f.LoopMerge(mergeL, contL)
+	f.Branch(condL)
+	f.LabelAt(condL)
+	cur := value{f.Load(st, v.ptr), s.ForVarType}
+	cond, ok := c.comparison(f, s.ForOp, cur, value{endC, s.ForVarType})
+	if !ok {
+		return fmt.Errorf("spirv: a for loop's operator %d", s.ForOp)
+	}
+	f.BranchConditional(cond.id, bodyL, mergeL)
+	f.LabelAt(bodyL)
+	c.loops = append(c.loops, [2]uint32{contL, mergeL})
+	ended, err := c.stmts(f, s.Blocks[0])
+	c.loops = c.loops[:len(c.loops)-1]
+	if err != nil {
+		return err
+	}
+	if !ended {
+		f.Branch(contL)
+	}
+	f.LabelAt(contL)
+	next := f.Load(st, v.ptr)
+	if s.ForVarType.Main == shaderir.Int {
+		next = f.IAdd(st, next, deltaC)
+	} else {
+		next = f.FAdd(st, next, deltaC)
+	}
+	f.Store(v.ptr, next)
+	f.Branch(header)
+	f.LabelAt(mergeL)
+	return nil
 }
 
 // expr evaluates an expression to a value.
@@ -388,6 +496,9 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		}
 		if v, ok, err := c.mathBuiltin(f, callee.BuiltinFunc, e.Exprs[1:]); ok || err != nil {
 			return v, err
+		}
+		if (callee.BuiltinFunc == shaderir.FloatF || callee.BuiltinFunc == shaderir.IntF) && len(e.Exprs) == 2 {
+			return c.convert(f, callee.BuiltinFunc, e.Exprs[1])
 		}
 		var t shaderir.Type
 		switch callee.BuiltinFunc {
@@ -452,6 +563,14 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		if err != nil {
 			return value{}, err
 		}
+		// an untyped number takes the other side's int type (n + 1)
+		if e.Exprs[1].Type == shaderir.NumberExpr && l.typ.Main == shaderir.Int {
+			id, _ := c.forConst(l.typ, e.Exprs[1].Const)
+			r = value{id, l.typ}
+		} else if e.Exprs[0].Type == shaderir.NumberExpr && r.typ.Main == shaderir.Int {
+			id, _ := c.forConst(r.typ, e.Exprs[0].Const)
+			l = value{id, r.typ}
+		}
 		if e.Op == shaderir.MatrixMul && l.typ.Main >= shaderir.Mat2 && l.typ.Main <= shaderir.Mat4 && r.typ.Main >= shaderir.Vec2 && r.typ.Main <= shaderir.Vec4 {
 			st, _ := c.typ(r.typ)
 			return value{f.MatrixTimesVector(st, l.id, r.id), r.typ}, nil
@@ -508,6 +627,9 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 	main := c.m.Function(void, c.m.TypeFunction(void), func(f *Function) {
 		f.Label()
 		for i, t := range block.LocalVars {
+			if t.Main == shaderir.None { // a for loop's counter: the for declares it, with its type
+				continue
+			}
 			st, err := c.typ(t)
 			if err != nil {
 				bodyErr = err
@@ -695,6 +817,9 @@ func (c *compiler) userFunc(fn *shaderir.Func) error {
 			c.vars[i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
 		}
 		for i, t := range fn.Block.LocalVars {
+			if t.Main == shaderir.None { // a for loop's counter: the for declares it, with its type
+				continue
+			}
 			st, err := c.typ(t)
 			if err != nil {
 				bodyErr = err
@@ -996,4 +1121,33 @@ func (c *compiler) shortCircuit(f *Function, e shaderir.Expr) (value, error) {
 	f.LabelAt(mergeL)
 	bt, _ := c.typ(l.typ)
 	return value{f.Phi(bt, l.id, from, r.id, rightEnd), l.typ}, nil
+}
+
+// convert is float(x) / int(x) of a scalar: OpConvertSToF / OpConvertFToS
+// (truncating, as Go and GLSL do), or the value itself when it already has
+// the type; a bare number becomes a constant of the type.
+func (c *compiler) convert(f *Function, fn shaderir.BuiltinFunc, arg shaderir.Expr) (value, error) {
+	to := shaderir.Type{Main: shaderir.Float}
+	if fn == shaderir.IntF {
+		to = shaderir.Type{Main: shaderir.Int}
+	}
+	if arg.Type == shaderir.NumberExpr {
+		id, err := c.forConst(to, arg.Const)
+		return value{id, to}, err
+	}
+	v, err := c.expr(f, arg)
+	if err != nil {
+		return value{}, err
+	}
+	if v.typ.Main == to.Main {
+		return v, nil
+	}
+	tt, _ := c.typ(to)
+	switch {
+	case to.Main == shaderir.Float && v.typ.Main == shaderir.Int:
+		return value{f.ConvertSToF(tt, v.id), to}, nil
+	case to.Main == shaderir.Int && v.typ.Main == shaderir.Float:
+		return value{f.op(opConvertFToS, tt, v.id), to}, nil
+	}
+	return value{}, fmt.Errorf("spirv: %s(%s) not supported yet", fn, v.typ.String())
 }
