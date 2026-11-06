@@ -32,9 +32,9 @@ import (
 // and receives its messages.
 var debugCallback func(vk.DebugMessage)
 
-// Graphics is the driver. PARTIAL (V4, step 1): one command buffer at a
-// time — End submits it and waits for the device (no frames in flight
-// yet); a dedicated allocation per image; layout transitions with
+// Graphics is the driver: up to framesInFlight batches on the device while
+// the next is recorded (End submits without waiting). PARTIAL: a dedicated
+// allocation per image; layout transitions with
 // all-commands barriers; new host buffers per batch for vertices, indices
 // and uniforms (a ring later). The screen (V5) is not here yet.
 type Graphics struct {
@@ -50,7 +50,8 @@ type Graphics struct {
 	maxImage  int
 
 	pool       vk.CommandPool
-	cb         vk.CommandBuffer
+	batches    [framesInFlight]batch
+	cur        int // the batch being (or next to be) recorded
 	recording  bool
 	serial     uint64 // the serial of the batch being recorded
 	completed  uint64 // the last batch the device has finished
@@ -140,8 +141,14 @@ func (g *Graphics) Initialize() error {
 	if g.pool, err = g.device.CreateCommandPool(g.family, resetCommandBuffer); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
-	if g.cb, err = g.device.AllocateCommandBuffer(g.pool); err != nil {
-		return fmt.Errorf("vulkan: %w", err)
+	for i := range g.batches {
+		b := &g.batches[i]
+		if b.cb, err = g.device.AllocateCommandBuffer(g.pool); err != nil {
+			return fmt.Errorf("vulkan: %w", err)
+		}
+		if b.fence, err = g.device.CreateFence(false); err != nil {
+			return fmt.Errorf("vulkan: %w", err)
+		}
 	}
 	return nil
 }
@@ -154,7 +161,12 @@ func (g *Graphics) destroy() {
 			img.Dispose()
 		}
 		g.destroyDrawing()
+		_ = g.device.WaitIdle()
+		g.retireUpTo(g.serial, true)
 		g.runAfterBatch()
+		for i := range g.batches {
+			g.device.DestroyFence(g.batches[i].fence)
+		}
 		g.device.DestroyCommandPool(g.pool)
 		g.device.Destroy()
 		g.device = nil
@@ -175,37 +187,121 @@ func (g *Graphics) Begin() error { return nil }
 
 func (g *Graphics) End(mode graphicsdriver.FlushMode) error { return g.flush() }
 
-// commandBuffer is the command buffer being recorded, begun if none is.
+// framesInFlight is how many batches may be submitted and not yet done:
+// the CPU records the next while the device runs the ones before.
+const framesInFlight = 3
+
+// batch is a command buffer submitted with its fence, its serial and what
+// to release once the device is done with it.
+type batch struct {
+	cb       vk.CommandBuffer
+	fence    vk.Fence
+	serial   uint64
+	after    []func()
+	inFlight bool
+}
+
+// commandBuffer is the command buffer being recorded, begun if none is —
+// in the next batch of the ring, waiting first for the device to finish
+// the batch last recorded in it.
 func (g *Graphics) commandBuffer() (vk.CommandBuffer, error) {
+	b := &g.batches[g.cur]
 	if !g.recording {
-		if err := g.device.BeginCommandBuffer(g.cb, vk.CommandBufferUsageOneTimeSubmitBit); err != nil {
+		if b.inFlight {
+			if err := g.retire(b); err != nil {
+				return 0, err
+			}
+		}
+		if err := g.device.ResetFence(b.fence); err != nil {
+			return 0, fmt.Errorf("vulkan: %w", err)
+		}
+		if err := g.device.BeginCommandBuffer(b.cb, vk.CommandBufferUsageOneTimeSubmitBit); err != nil {
 			return 0, fmt.Errorf("vulkan: %w", err)
 		}
 		g.recording = true
 	}
-	return g.cb, nil
+	return b.cb, nil
 }
 
-// flush submits what was recorded and waits for the device; the batch's
-// staging resources are released and its read-backs complete.
+// flush submits what was recorded with its batch's fence — without
+// waiting: the batch's resources are released and its read-backs complete
+// when the fence is seen signaled (retire).
 func (g *Graphics) flush() error {
 	if !g.recording {
 		return nil
 	}
 	g.recording = false
-	if err := g.device.EndCommandBuffer(g.cb); err != nil {
+	b := &g.batches[g.cur]
+	if err := g.device.EndCommandBuffer(b.cb); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
-	if err := g.device.QueueSubmit(g.queue, g.cb); err != nil {
+	if err := g.device.QueueSubmitFence(g.queue, b.fence, b.cb); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
-	if err := g.device.QueueWaitIdle(g.queue); err != nil {
-		return fmt.Errorf("vulkan: %w", err)
-	}
-	g.completed = g.serial
+	b.serial, b.after, b.inFlight = g.serial, g.afterBatch, true
+	g.afterBatch = nil
 	g.serial++
-	g.runAfterBatch()
+	g.cur = (g.cur + 1) % framesInFlight
 	return nil
+}
+
+// retire waits for the batch's fence and releases what it used.
+func (g *Graphics) retire(b *batch) error {
+	if err := g.device.WaitForFence(b.fence); err != nil {
+		return fmt.Errorf("vulkan: %w", err)
+	}
+	for _, f := range b.after {
+		f()
+	}
+	b.after, b.inFlight = nil, false
+	g.completed = max(g.completed, b.serial)
+	return nil
+}
+
+// retireUpTo retires the batches in flight up to serial, oldest first —
+// waiting for them when wait, else only those whose fences are signaled
+// (stopping at the first that isn't). Whether serial has completed.
+func (g *Graphics) retireUpTo(serial uint64, wait bool) bool {
+	for {
+		var oldest *batch
+		for i := range g.batches {
+			if b := &g.batches[i]; b.inFlight && b.serial <= serial && (oldest == nil || b.serial < oldest.serial) {
+				oldest = b
+			}
+		}
+		if oldest == nil {
+			return g.completed >= serial
+		}
+		if !wait {
+			if done, err := g.device.FenceSignaled(oldest.fence); err != nil || !done {
+				return false
+			}
+		}
+		if err := g.retire(oldest); err != nil {
+			return false
+		}
+	}
+}
+
+// release runs free once the device can no longer be using what it frees:
+// after the batch being recorded, else after the newest one in flight,
+// else now.
+func (g *Graphics) release(free func()) {
+	if g.recording {
+		g.afterBatch = append(g.afterBatch, free)
+		return
+	}
+	var newest *batch
+	for i := range g.batches {
+		if b := &g.batches[i]; b.inFlight && (newest == nil || b.serial > newest.serial) {
+			newest = b
+		}
+	}
+	if newest != nil {
+		newest.after = append(newest.after, free)
+		return
+	}
+	free()
 }
 
 func (g *Graphics) runAfterBatch() {

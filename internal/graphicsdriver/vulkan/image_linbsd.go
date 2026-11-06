@@ -17,6 +17,7 @@
 package vulkan
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
@@ -92,11 +93,7 @@ func (i *Image) Dispose() {
 		g.device.DestroyImage(img)
 		g.device.FreeMemory(mem)
 	}
-	if g.recording {
-		g.afterBatch = append(g.afterBatch, free)
-		return
-	}
-	free()
+	g.release(free)
 }
 
 // transition records a barrier moving the image to layout, after and before
@@ -236,7 +233,7 @@ func (r *readback) Poll() (bool, error) {
 	if r.done {
 		return true, nil
 	}
-	if r.g.completed < r.serial {
+	if !r.g.retireUpTo(r.serial, false) { // its batch's fence, not waited for
 		return false, nil
 	}
 	r.copyOut()
@@ -249,8 +246,13 @@ func (r *readback) Wait() error {
 		return nil
 	}
 	if r.g.completed < r.serial {
-		if err := r.g.flush(); err != nil {
-			return err
+		if r.g.recording && r.g.serial == r.serial { // its batch not submitted yet
+			if err := r.g.flush(); err != nil {
+				return err
+			}
+		}
+		if !r.g.retireUpTo(r.serial, true) {
+			return errors.New("vulkan: the read-back's batch failed")
 		}
 	}
 	r.copyOut()
@@ -264,8 +266,8 @@ func (r *readback) Dispose() {
 	}
 	b, g := r.buf, r.g
 	r.buf = nil
-	if g.recording && g.completed < r.serial {
-		g.afterBatch = append(g.afterBatch, func() { g.freeHostBuffer(b) })
+	if g.completed < r.serial { // its batch may still be writing it
+		g.release(func() { g.freeHostBuffer(b) })
 		return
 	}
 	g.freeHostBuffer(b)

@@ -21,6 +21,7 @@ import (
 	"image"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
@@ -141,8 +142,8 @@ func TestWriteReadPixels(t *testing.T) {
 }
 
 // A read-back sees the writes recorded before it and not those after it;
-// it is not done until its batch ends (End), then Poll reports it without
-// waiting.
+// it is not done until its batch is submitted (End), and Poll — which
+// never waits — reports it once the device has finished that batch.
 func TestReadPixelsAsyncOrder(t *testing.T) {
 	g := testGraphics(t)
 	img, err := g.NewImage(2, 1)
@@ -173,8 +174,21 @@ func TestReadPixelsAsyncOrder(t *testing.T) {
 	if err := g.End(graphicsdriver.FlushModeIntermediate); err != nil {
 		t.Fatal(err)
 	}
-	if done, err := rb.Poll(); err != nil || !done {
-		t.Fatalf("Poll after End: %v, %v; want done", done, err)
+	// End submits without waiting: Poll (never blocking) reports the
+	// read-back done once the device has finished its batch.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		done, err := rb.Poll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Poll after End: never done")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if !bytes.Equal(out, a) {
 		t.Errorf("read %v, want the first write %v", out, a)

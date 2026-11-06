@@ -65,11 +65,7 @@ func (s *Shader) Dispose() {
 		g.device.DestroyShaderModule(vs)
 		g.device.DestroyShaderModule(fs)
 	}
-	if g.recording {
-		g.afterBatch = append(g.afterBatch, free)
-		return
-	}
-	free()
+	g.release(free)
 }
 
 func (g *Graphics) NewShader(program *shaderir.Program) (graphicsdriver.Shader, error) {
@@ -227,13 +223,13 @@ func (g *Graphics) SetVertices(vertices []float32, indices []uint32) error {
 	}
 	copy(vb.mapped, unsafe.Slice((*byte)(unsafe.Pointer(&vertices[0])), 4*len(vertices)))
 	copy(ib.mapped, unsafe.Slice((*byte)(unsafe.Pointer(&indices[0])), 4*len(indices)))
-	g.retire(vb, ib)
+	g.retireBuffers(vb, ib)
 	g.vertexBuf, g.indexBuf = vb, ib
 	return nil
 }
 
-// retire frees the buffers after the batch that may use them.
-func (g *Graphics) retire(bufs ...*hostBuffer) {
+// retireBuffers frees the buffers after the batch that may use them.
+func (g *Graphics) retireBuffers(bufs ...*hostBuffer) {
 	g.afterBatch = append(g.afterBatch, func() {
 		for _, b := range bufs {
 			g.freeHostBuffer(b)
@@ -282,7 +278,7 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 	if err != nil {
 		return err
 	}
-	g.retire(ub)
+	g.retireBuffers(ub)
 	copy(ub.mapped, unsafe.Slice((*byte)(unsafe.Pointer(&packed[0])), 4*len(packed)))
 
 	cb, err := g.commandBuffer()

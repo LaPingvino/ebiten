@@ -34,6 +34,7 @@ type Device struct {
 		createCommandPool, destroyCommandPool, allocateCommandBuffers                  uintptr
 		beginCommandBuffer, endCommandBuffer, cmdFillBuffer                            uintptr
 		queueSubmit, queueWaitIdle                                                     uintptr
+		createFence, destroyFence, waitForFences, resetFences, getFenceStatus          uintptr
 		createImage, destroyImage, getImageMemoryRequirements, bindImageMemory         uintptr
 		cmdPipelineBarrier2, cmdClearColorImage, cmdCopyImageToBuffer                  uintptr
 		createShaderModule, destroyShaderModule                                        uintptr
@@ -77,6 +78,11 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkCmdFillBuffer", &d.fn.cmdFillBuffer},
 		{"vkQueueSubmit", &d.fn.queueSubmit},
 		{"vkQueueWaitIdle", &d.fn.queueWaitIdle},
+		{"vkCreateFence", &d.fn.createFence},
+		{"vkDestroyFence", &d.fn.destroyFence},
+		{"vkWaitForFences", &d.fn.waitForFences},
+		{"vkResetFences", &d.fn.resetFences},
+		{"vkGetFenceStatus", &d.fn.getFenceStatus},
 		{"vkCreateImage", &d.fn.createImage},
 		{"vkDestroyImage", &d.fn.destroyImage},
 		{"vkGetImageMemoryRequirements", &d.fn.getImageMemoryRequirements},
