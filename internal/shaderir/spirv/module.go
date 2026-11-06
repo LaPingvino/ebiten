@@ -64,6 +64,16 @@ const (
 	opCompositeExtract   = 81
 	opConvertSToF        = 111
 	opFSub               = 131
+	opFunctionParameter  = 55
+	opFunctionCall       = 57
+	opReturnValue        = 254
+	opIAdd               = 128
+	opFAdd               = 129
+	opISub               = 130
+	opIMul               = 132
+	opSDiv               = 135
+	opFDiv               = 136
+	opVectorTimesScalar  = 142
 	opFMul               = 133
 	opShiftLeftLogical   = 196
 	opBitwiseAnd         = 199
@@ -376,6 +386,34 @@ func (f *Function) AccessChain(pointerType, base uint32, indices ...uint32) uint
 // MatrixTimesVector is matrix × vector (columns-major, as GLSL's m * v).
 func (f *Function) MatrixTimesVector(typ, matrix, vector uint32) uint32 {
 	return f.op(opMatrixTimesVector, typ, matrix, vector)
+}
+
+// Parameter is an OpFunctionParameter of a type — only before the
+// function's first Label, one per parameter in the function type's order.
+func (f *Function) Parameter(typ uint32) uint32 {
+	id := f.m.ID()
+	inst(&f.m.functions, opFunctionParameter, typ, id)
+	return id
+}
+
+// Call is OpFunctionCall of a function returning typ with the arguments.
+func (f *Function) Call(typ, fn uint32, args ...uint32) uint32 {
+	return f.op(opFunctionCall, typ, append([]uint32{fn}, args...)...)
+}
+
+// ReturnValue ends a block returning a value.
+func (f *Function) ReturnValue(v uint32) { inst(&f.m.functions, opReturnValue, v) }
+
+// Arithmetic: a op b of one type (floats or float vectors: F*; integers: I*,
+// SDiv); VectorTimesScalar is a float vector × a float.
+func (f *Function) FAdd(typ, a, b uint32) uint32 { return f.op(opFAdd, typ, a, b) }
+func (f *Function) FDiv(typ, a, b uint32) uint32 { return f.op(opFDiv, typ, a, b) }
+func (f *Function) IAdd(typ, a, b uint32) uint32 { return f.op(opIAdd, typ, a, b) }
+func (f *Function) ISub(typ, a, b uint32) uint32 { return f.op(opISub, typ, a, b) }
+func (f *Function) IMul(typ, a, b uint32) uint32 { return f.op(opIMul, typ, a, b) }
+func (f *Function) SDiv(typ, a, b uint32) uint32 { return f.op(opSDiv, typ, a, b) }
+func (f *Function) VectorTimesScalar(typ, v, s uint32) uint32 {
+	return f.op(opVectorTimesScalar, typ, v, s)
 }
 
 // Return ends a block, returning nothing.

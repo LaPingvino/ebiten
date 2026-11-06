@@ -1137,8 +1137,10 @@ func TestKageEndToEnd(t *testing.T) {
 	}{
 		{"return vec4(1, 0, 0, 1)", [4]float32{0, 0, 1, 1}, [4]byte{255, 0, 0, 255}},
 		{"return color", [4]float32{0, 1, 0, 1}, [4]byte{0, 255, 0, 255}},
+		// a local, *= by a scalar, a user function, + a vector: (0,1,0,1) → (0,2,0,2) → (0,1,0,1) → (0,1,0.25,1)
+		{"clr := color\n\tclr *= 2.0\n\treturn half(clr) + vec4(0, 0, 0.25, 0)", [4]float32{0, 1, 0, 1}, [4]byte{0, 255, 64, 255}},
 	} {
-		p, err := graphics.CompileShader([]byte("//kage:unit pixels\npackage main\nfunc Fragment(dst vec4, src vec2, color vec4) vec4 { " + c.body + " }\n"))
+		p, err := graphics.CompileShader([]byte("//kage:unit pixels\npackage main\nfunc half(c vec4) vec4 { return c * 0.5 }\nfunc Fragment(dst vec4, src vec2, color vec4) vec4 {\n\t" + c.body + "\n}\n"))
 		if err != nil {
 			t.Fatal(err)
 		}

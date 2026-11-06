@@ -49,13 +49,15 @@ type compiler struct {
 	vars     map[int]variable
 	types    map[shaderir.BasicType]uint32
 	result   uint32 // the fragment function's output (Location 0): where a returned value goes; 0 in the vertex function
+	inFunc   bool   // compiling a user function: a returned value is OpReturnValue
+	funcs    map[int]uint32
 }
 
 func newCompiler(p *shaderir.Program) *compiler {
 	m := NewModule()
 	m.Capability(CapabilityShader)
 	m.MemoryModel(AddressingLogical, MemoryModelGLSL450)
-	return &compiler{m: m, p: p, vars: map[int]variable{}, types: map[shaderir.BasicType]uint32{}}
+	return &compiler{m: m, p: p, vars: map[int]variable{}, types: map[shaderir.BasicType]uint32{}, funcs: map[int]uint32{}}
 }
 
 // typ is a shaderir type as a SPIR-V type (arrays and structs: not here —
@@ -173,6 +175,9 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 		interfaces = append(interfaces, c.uniforms) // SPIR-V 1.4+: every global the entry point uses
 	}
 	block := p.VertexFunc.Block
+	if err := c.userFuncs(block); err != nil {
+		return nil, err
+	}
 	void := c.m.TypeVoid()
 	var bodyErr error
 	main := c.m.Function(void, c.m.TypeFunction(void), func(f *Function) {
@@ -216,12 +221,16 @@ func (c *compiler) block(f *Function, b *shaderir.Block) error {
 			f.Store(v.ptr, rhs.id)
 		case shaderir.Return:
 			if len(s.Exprs) > 0 {
-				if c.result == 0 {
-					return fmt.Errorf("spirv: a returned value outside the fragment function")
-				}
 				v, err := c.expr(f, s.Exprs[0])
 				if err != nil {
 					return err
+				}
+				if c.inFunc {
+					f.ReturnValue(v.id)
+					return nil
+				}
+				if c.result == 0 {
+					return fmt.Errorf("spirv: a returned value outside the fragment function")
 				}
 				if v.typ.Main != shaderir.Vec4 {
 					return fmt.Errorf("spirv: the fragment function returns %s, not vec4", v.typ.String())
@@ -269,6 +278,9 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		return value{f.Load(st, ptr), t}, nil
 	case shaderir.Call:
 		callee := e.Exprs[0]
+		if callee.Type == shaderir.FunctionExpr {
+			return c.callUser(f, callee.Index, e.Exprs[1:])
+		}
 		if callee.Type != shaderir.BuiltinFuncExpr {
 			return value{}, fmt.Errorf("spirv: calls of expression type %d not supported yet", callee.Type)
 		}
@@ -315,6 +327,9 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 			st, _ := c.typ(r.typ)
 			return value{f.MatrixTimesVector(st, l.id, r.id), r.typ}, nil
 		}
+		if v, ok, err := c.arithmetic(f, e.Op, l, r); ok || err != nil {
+			return v, err
+		}
 		return value{}, fmt.Errorf("spirv: operator %d on %s and %s not supported yet", e.Op, l.typ.String(), r.typ.String())
 	}
 	return value{}, fmt.Errorf("spirv: expression type %d not supported yet", e.Type)
@@ -353,6 +368,9 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 		interfaces = append(interfaces, c.uniforms)
 	}
 	block := p.FragmentFunc.Block
+	if err := c.userFuncs(block); err != nil {
+		return nil, err
+	}
 	void := c.m.TypeVoid()
 	var bodyErr error
 	main := c.m.Function(void, c.m.TypeFunction(void), func(f *Function) {
@@ -373,4 +391,212 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 	c.m.EntryPoint(ExecutionModelFragment, main, "main", interfaces...)
 	c.m.ExecutionMode(main, ExecutionModeOriginUpperLeft)
 	return c.m.Words(), nil
+}
+
+func isFloatish(t shaderir.Type) bool {
+	return t.Main == shaderir.Float || (t.Main >= shaderir.Vec2 && t.Main <= shaderir.Vec4)
+}
+
+func isIntish(t shaderir.Type) bool {
+	return t.Main == shaderir.Int || (t.Main >= shaderir.IVec2 && t.Main <= shaderir.IVec4)
+}
+
+// arithmetic is + − * / on floats / float vectors (one type, or a vector with
+// a scalar on either side — the scalar spread for + − /, VectorTimesScalar
+// for *) and on ints / int vectors of one type. ok false: not one of these.
+func (c *compiler) arithmetic(f *Function, op shaderir.Op, l, r value) (value, bool, error) {
+	if op != shaderir.Add && op != shaderir.Sub && op != shaderir.ComponentWiseMul && op != shaderir.Div {
+		return value{}, false, nil
+	}
+	switch {
+	case isFloatish(l.typ) && isFloatish(r.typ):
+		if l.typ.Main != r.typ.Main { // a vector and a scalar
+			vec, sc, scalarLeft := l, r, false
+			if l.typ.Main == shaderir.Float {
+				vec, sc, scalarLeft = r, l, true
+			}
+			if sc.typ.Main != shaderir.Float {
+				return value{}, true, fmt.Errorf("spirv: %s with %s", l.typ.String(), r.typ.String())
+			}
+			vt, _ := c.typ(vec.typ)
+			if op == shaderir.ComponentWiseMul {
+				return value{f.VectorTimesScalar(vt, vec.id, sc.id), vec.typ}, true, nil
+			}
+			parts := make([]uint32, vec.typ.DwordCount())
+			for i := range parts {
+				parts[i] = sc.id
+			}
+			spread := value{f.CompositeConstruct(vt, parts...), vec.typ}
+			if scalarLeft {
+				l = spread
+			} else {
+				r = spread
+			}
+		}
+		t, _ := c.typ(l.typ)
+		switch op {
+		case shaderir.Add:
+			return value{f.FAdd(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.Sub:
+			return value{f.FSub(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.ComponentWiseMul:
+			return value{f.FMul(t, l.id, r.id), l.typ}, true, nil
+		default:
+			return value{f.FDiv(t, l.id, r.id), l.typ}, true, nil
+		}
+	case isIntish(l.typ) && l.typ.Main == r.typ.Main:
+		t, _ := c.typ(l.typ)
+		switch op {
+		case shaderir.Add:
+			return value{f.IAdd(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.Sub:
+			return value{f.ISub(t, l.id, r.id), l.typ}, true, nil
+		case shaderir.ComponentWiseMul:
+			return value{f.IMul(t, l.id, r.id), l.typ}, true, nil
+		default:
+			return value{f.SDiv(t, l.id, r.id), l.typ}, true, nil
+		}
+	}
+	return value{}, false, nil
+}
+
+// userFuncs compiles the user functions the block reaches, callees first —
+// each before any code that calls it, as a module's functions can't
+// interleave.
+func (c *compiler) userFuncs(root *shaderir.Block) error {
+	var visit func(b *shaderir.Block) error
+	var visitExpr func(e shaderir.Expr) error
+	visiting := map[int]bool{}
+	visitExpr = func(e shaderir.Expr) error {
+		if e.Type == shaderir.Call && len(e.Exprs) > 0 && e.Exprs[0].Type == shaderir.FunctionExpr {
+			idx := e.Exprs[0].Index
+			if _, done := c.funcs[idx]; !done {
+				if visiting[idx] {
+					return fmt.Errorf("spirv: recursion through function %d", idx)
+				}
+				visiting[idx] = true
+				fn := c.funcByIndex(idx)
+				if fn == nil {
+					return fmt.Errorf("spirv: unknown function %d", idx)
+				}
+				if err := visit(fn.Block); err != nil {
+					return err
+				}
+				if err := c.userFunc(fn); err != nil {
+					return err
+				}
+			}
+		}
+		for _, s := range e.Exprs {
+			if err := visitExpr(s); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	visit = func(b *shaderir.Block) error {
+		if b == nil {
+			return nil
+		}
+		for _, s := range b.Stmts {
+			for _, e := range s.Exprs {
+				if err := visitExpr(e); err != nil {
+					return err
+				}
+			}
+			for _, bb := range s.Blocks {
+				if err := visit(bb); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return visit(root)
+}
+
+func (c *compiler) funcByIndex(idx int) *shaderir.Func {
+	for i := range c.p.Funcs {
+		if c.p.Funcs[i].Index == idx {
+			return &c.p.Funcs[i]
+		}
+	}
+	return nil
+}
+
+// userFunc compiles one user function: its in-parameters by value (each
+// copied into a Function variable, so the body may assign it), its locals,
+// its body. PARTIAL: out-parameters.
+func (c *compiler) userFunc(fn *shaderir.Func) error {
+	if len(fn.OutParams) > 0 {
+		return fmt.Errorf("spirv: out-parameters (function %d) not supported yet", fn.Index)
+	}
+	ret := c.m.TypeVoid()
+	if fn.Return.Main != shaderir.None {
+		var err error
+		if ret, err = c.typ(fn.Return); err != nil {
+			return err
+		}
+	}
+	params := make([]uint32, len(fn.InParams))
+	for i, t := range fn.InParams {
+		var err error
+		if params[i], err = c.typ(t); err != nil {
+			return err
+		}
+	}
+	saved, savedResult, savedIn := c.vars, c.result, c.inFunc
+	c.vars, c.result, c.inFunc = map[int]variable{}, 0, true
+	defer func() { c.vars, c.result, c.inFunc = saved, savedResult, savedIn }()
+	var bodyErr error
+	id := c.m.Function(ret, c.m.TypeFunction(ret, params...), func(f *Function) {
+		ids := make([]uint32, len(params))
+		for i, t := range params {
+			ids[i] = f.Parameter(t)
+		}
+		f.Label()
+		for i, t := range fn.InParams {
+			ptr := f.LocalVariable(c.m.TypePointer(StorageClassFunction, params[i]))
+			c.vars[i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
+		}
+		for i, t := range fn.Block.LocalVars {
+			st, err := c.typ(t)
+			if err != nil {
+				bodyErr = err
+				return
+			}
+			c.vars[fn.Block.LocalVarIndexOffset+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+		}
+		for i := range fn.InParams {
+			f.Store(c.vars[i].ptr, ids[i])
+		}
+		bodyErr = c.block(f, fn.Block)
+	})
+	if bodyErr != nil {
+		return bodyErr
+	}
+	c.funcs[fn.Index] = id
+	return nil
+}
+
+// callUser is a call of a compiled user function.
+func (c *compiler) callUser(f *Function, idx int, args []shaderir.Expr) (value, error) {
+	id, ok := c.funcs[idx]
+	fn := c.funcByIndex(idx)
+	if !ok || fn == nil {
+		return value{}, fmt.Errorf("spirv: function %d not compiled", idx)
+	}
+	var ids []uint32
+	for _, a := range args {
+		v, err := c.expr(f, a)
+		if err != nil {
+			return value{}, err
+		}
+		ids = append(ids, v.id)
+	}
+	ret := c.m.TypeVoid()
+	if fn.Return.Main != shaderir.None {
+		ret, _ = c.typ(fn.Return)
+	}
+	return value{f.Call(ret, id, ids...), fn.Return}, nil
 }
