@@ -17,7 +17,13 @@
 package vk_test
 
 import (
+	"encoding/binary"
 	"errors"
+	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -467,6 +473,25 @@ func shaders(t *testing.T, device *vk.Device, rgba [4]float32, scale float32) (v
 // and reads the image back.
 func draw(t *testing.T, w, h uint32, scale float32) []byte {
 	t.Helper()
+	return drawScene(t, w, h, func(device *vk.Device) scene {
+		vs, fs := shaders(t, device, [4]float32{1, 0, 0, 1}, scale)
+		return scene{vs: vs, fs: fs, count: 3}
+	})
+}
+
+// scene is what drawScene draws: shaders, their vertex input (nil: none) and
+// vertices (floats, uploaded to a vertex buffer), and how many vertices.
+type scene struct {
+	vs, fs   vk.ShaderModule
+	layout   *vk.VertexLayout
+	vertices []float32
+	count    uint32
+}
+
+// drawScene renders a scene into a w×h RGBA image cleared blue and reads the
+// image back.
+func drawScene(t *testing.T, w, h uint32, make func(*vk.Device) scene) []byte {
+	t.Helper()
 	instance, physical, family := testInstance(t)
 	device, err := vk.CreateDevice(instance, physical, family, &vk.PhysicalDeviceVulkan13Features{Synchronization2: 1, DynamicRendering: 1}, nil)
 	if err != nil {
@@ -497,15 +522,45 @@ func draw(t *testing.T, w, h uint32, scale float32) []byte {
 	}
 	defer device.DestroyImageView(view)
 
-	vs, fs := shaders(t, device, [4]float32{1, 0, 0, 1}, scale)
-	defer device.DestroyShaderModule(vs)
-	defer device.DestroyShaderModule(fs)
+	sc := make(device)
+	defer device.DestroyShaderModule(sc.vs)
+	defer device.DestroyShaderModule(sc.fs)
+	var vbuf vk.Buffer
+	if len(sc.vertices) > 0 {
+		size := uint64(len(sc.vertices) * 4)
+		var err error
+		if vbuf, err = device.CreateBuffer(size, vk.BufferUsageVertexBufferBit); err != nil {
+			t.Fatal(err)
+		}
+		defer device.DestroyBuffer(vbuf)
+		vreq := device.BufferMemoryRequirements(vbuf)
+		vtyp, ok := props.FindMemoryType(vreq.MemoryTypeBits, vk.MemoryPropertyHostVisibleBit|vk.MemoryPropertyHostCoherentBit)
+		if !ok {
+			t.Skip("no host-visible, coherent memory")
+		}
+		vmem, err := device.AllocateMemory(vreq.Size, vtyp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer device.FreeMemory(vmem)
+		if err := device.BindBufferMemory(vbuf, vmem, 0); err != nil {
+			t.Fatal(err)
+		}
+		m, err := device.MapMemory(vmem, 0, size)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, f := range sc.vertices {
+			binary.LittleEndian.PutUint32(m[i*4:], math.Float32bits(f))
+		}
+		device.UnmapMemory(vmem)
+	}
 	layout, err := device.CreatePipelineLayout()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer device.DestroyPipelineLayout(layout)
-	pipeline, err := device.CreateGraphicsPipeline(layout, vs, fs, vk.FormatR8G8B8A8Unorm)
+	pipeline, err := device.CreateGraphicsPipeline(layout, sc.vs, sc.fs, sc.layout, vk.FormatR8G8B8A8Unorm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +608,10 @@ func draw(t *testing.T, w, h uint32, scale float32) []byte {
 	device.CmdBindGraphicsPipeline(cb, pipeline)
 	device.CmdSetViewport(cb, vk.Viewport{Width: float32(w), Height: float32(h), MaxDepth: 1})
 	device.CmdSetScissor(cb, area)
-	device.CmdDraw(cb, 3, 1, 0, 0)
+	if vbuf != 0 {
+		device.CmdBindVertexBuffer(cb, vbuf, 0)
+	}
+	device.CmdDraw(cb, sc.count, 1, 0, 0)
 	device.CmdEndRendering(cb)
 	device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
 		SrcStageMask: vk.PipelineStage2ColorAttachmentOutput, SrcAccessMask: vk.Access2ColorAttachmentWrite,
@@ -643,4 +701,132 @@ func TestHalfTriangle(t *testing.T) {
 		rows = append(rows, row)
 	}
 	t.Logf("drawn:\n%s", strings.Join(rows, "\n"))
+}
+
+// ebitengineVertex is Ebitengine's vertex as the driver gets it: 12 floats —
+// the destination position (2), the source texture position (2), the colour
+// (4, premultiplied) and 4 custom values — at Locations 0–3.
+var ebitengineVertex = &vk.VertexLayout{Stride: 12 * 4, Attributes: []vk.VertexInputAttributeDescription{
+	{Location: 0, Format: vk.FormatR32G32Sfloat, Offset: 0},
+	{Location: 1, Format: vk.FormatR32G32Sfloat, Offset: 2 * 4},
+	{Location: 2, Format: vk.FormatR32G32B32A32Sfloat, Offset: 4 * 4},
+	{Location: 3, Format: vk.FormatR32G32B32A32Sfloat, Offset: 8 * 4},
+}}
+
+// colourShaders: a vertex shader taking Ebitengine's vertex (position in clip
+// space here — the projection comes with the driver) and handing its colour
+// on as a varying at Location 0; a fragment shader writing that colour.
+func colourShaders(t *testing.T, device *vk.Device) (vk.ShaderModule, vk.ShaderModule) {
+	t.Helper()
+	vert := spirv.NewModule()
+	vert.Capability(spirv.CapabilityShader)
+	vert.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	f32 := vert.TypeFloat(32)
+	vec2, vec4 := vert.TypeVector(f32, 2), vert.TypeVector(f32, 4)
+	in := func(typ, loc uint32) uint32 {
+		v := vert.Variable(vert.TypePointer(spirv.StorageClassInput, typ), spirv.StorageClassInput)
+		vert.Decorate(v, spirv.DecorationLocation, loc)
+		return v
+	}
+	dst, src, col, custom := in(vec2, 0), in(vec2, 1), in(vec4, 2), in(vec4, 3)
+	pos := vert.Variable(vert.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	vert.Decorate(pos, spirv.DecorationBuiltIn, spirv.BuiltInPosition)
+	vcol := vert.Variable(vert.TypePointer(spirv.StorageClassOutput, vec4), spirv.StorageClassOutput)
+	vert.Decorate(vcol, spirv.DecorationLocation, 0)
+	zero, one := vert.ConstantFloat32(0), vert.ConstantFloat32(1)
+	void := vert.TypeVoid()
+	vmain := vert.Function(void, vert.TypeFunction(void), func(f *spirv.Function) {
+		f.Label()
+		d := f.Load(vec2, dst)
+		f.Store(pos, f.CompositeConstruct(vec4, f.CompositeExtract(f32, d, 0), f.CompositeExtract(f32, d, 1), zero, one))
+		f.Store(vcol, f.Load(vec4, col))
+		f.Return()
+	})
+	vert.EntryPoint(spirv.ExecutionModelVertex, vmain, "main", dst, src, col, custom, pos, vcol)
+
+	frag := spirv.NewModule()
+	frag.Capability(spirv.CapabilityShader)
+	frag.MemoryModel(spirv.AddressingLogical, spirv.MemoryModelGLSL450)
+	fvec4 := frag.TypeVector(frag.TypeFloat(32), 4)
+	fin := frag.Variable(frag.TypePointer(spirv.StorageClassInput, fvec4), spirv.StorageClassInput)
+	frag.Decorate(fin, spirv.DecorationLocation, 0)
+	out := frag.Variable(frag.TypePointer(spirv.StorageClassOutput, fvec4), spirv.StorageClassOutput)
+	frag.Decorate(out, spirv.DecorationLocation, 0)
+	fvoid := frag.TypeVoid()
+	fmain := frag.Function(fvoid, frag.TypeFunction(fvoid), func(f *spirv.Function) {
+		f.Label()
+		f.Store(out, f.Load(fvec4, fin))
+		f.Return()
+	})
+	frag.EntryPoint(spirv.ExecutionModelFragment, fmain, "main", fin, out)
+	frag.ExecutionMode(fmain, spirv.ExecutionModeOriginUpperLeft)
+
+	for _, m := range []*spirv.Module{vert, frag} {
+		spirvVal(t, m.Bytes())
+	}
+	vs, err := device.CreateShaderModule(vert.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := device.CreateShaderModule(frag.Words())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vs, fs
+}
+
+// Vertex input: one triangle from a vertex buffer in Ebitengine's layout,
+// red / green / blue at its corners, covering the top-left half of a 16×16
+// image; the colours interpolate across it. Checked: each corner pixel is
+// nearly its vertex's colour, a pixel in the middle mixes them, and the
+// other half keeps the clear colour.
+func TestVertexInputInterpolates(t *testing.T) {
+	const n = 16
+	px := drawScene(t, n, n, func(device *vk.Device) scene {
+		vs, fs := colourShaders(t, device)
+		v := func(x, y, r, g, b float32) []float32 { return []float32{x, y, 0, 0, r, g, b, 1, 0, 0, 0, 0} }
+		verts := slices.Concat(v(-1, -1, 1, 0, 0), v(1, -1, 0, 1, 0), v(-1, 1, 0, 0, 1))
+		return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, count: 3}
+	})
+	at := func(x, y int) [4]byte { i := (y*n + x) * 4; return [4]byte(px[i : i+4]) }
+	near := func(got, want [4]byte) bool {
+		for i := range got {
+			if d := int(got[i]) - int(want[i]); d < -40 || d > 40 {
+				return false
+			}
+		}
+		return true
+	}
+	if c := at(0, 0); !near(c, [4]byte{255, 0, 0, 255}) {
+		t.Errorf("top-left %v: want nearly red", c)
+	}
+	if c := at(n-2, 0); !near(c, [4]byte{0, 255, 0, 255}) {
+		t.Errorf("top-right %v: want nearly green", c)
+	}
+	if c := at(0, n-2); !near(c, [4]byte{0, 0, 255, 255}) {
+		t.Errorf("bottom-left %v: want nearly blue", c)
+	}
+	if c := at(4, 4); c[0] < 60 || c[1] < 40 || c[2] < 40 {
+		t.Errorf("inside %v: want a mix of all three", c)
+	}
+	if c := at(n-1, n-1); c != blue {
+		t.Errorf("bottom-right %v: want the clear colour", c)
+	}
+}
+
+// spirvVal checks a module with spirv-val (Vulkan 1.3 rules) where
+// SPIRV-Tools is installed.
+func spirvVal(t *testing.T, b []byte) {
+	t.Helper()
+	val, err := exec.LookPath("spirv-val")
+	if err != nil {
+		return
+	}
+	p := filepath.Join(t.TempDir(), "m.spv")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(val, "--target-env", "vulkan1.3", p).CombinedOutput(); err != nil {
+		t.Fatalf("spirv-val: %v\n%s", err, out)
+	}
 }

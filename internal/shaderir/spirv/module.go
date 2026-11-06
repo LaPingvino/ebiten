@@ -55,6 +55,7 @@ const (
 	opFunction           = 54
 	opFunctionEnd        = 56
 	opCompositeConstruct = 80
+	opCompositeExtract   = 81
 	opConvertSToF        = 111
 	opFSub               = 131
 	opFMul               = 133
@@ -304,6 +305,11 @@ func (f *Function) FSub(typ, a, b uint32) uint32 { return f.op(opFSub, typ, a, b
 // CompositeConstruct builds a composite (a vector) from its parts.
 func (f *Function) CompositeConstruct(typ uint32, parts ...uint32) uint32 {
 	return f.op(opCompositeConstruct, typ, parts...)
+}
+
+// CompositeExtract is one part of a composite (a vector's component).
+func (f *Function) CompositeExtract(typ, composite uint32, indices ...uint32) uint32 {
+	return f.op(opCompositeExtract, typ, append([]uint32{composite}, indices...)...)
 }
 
 // Return ends a block, returning nothing.

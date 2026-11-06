@@ -79,6 +79,8 @@ func TestStructsMatchHeader(t *testing.T) {
 		"VkPipelineLayoutCreateInfo":             PipelineLayoutCreateInfo{},
 		"VkPipelineShaderStageCreateInfo":        PipelineShaderStageCreateInfo{},
 		"VkPipelineVertexInputStateCreateInfo":   PipelineVertexInputStateCreateInfo{},
+		"VkVertexInputBindingDescription":        VertexInputBindingDescription{},
+		"VkVertexInputAttributeDescription":      VertexInputAttributeDescription{},
 		"VkPipelineInputAssemblyStateCreateInfo": PipelineInputAssemblyStateCreateInfo{},
 		"VkPipelineViewportStateCreateInfo":      PipelineViewportStateCreateInfo{},
 		"VkPipelineRasterizationStateCreateInfo": PipelineRasterizationStateCreateInfo{},
@@ -187,6 +189,9 @@ func TestConstantsMatchHeader(t *testing.T) {
 	h := vulkanHeader(t)
 	for c, v := range map[string]uint64{
 		"VK_FORMAT_R8G8B8A8_UNORM":                        uint64(FormatR8G8B8A8Unorm),
+		"VK_FORMAT_R32G32_SFLOAT":                         uint64(FormatR32G32Sfloat),
+		"VK_FORMAT_R32G32B32A32_SFLOAT":                   uint64(FormatR32G32B32A32Sfloat),
+		"VK_VERTEX_INPUT_RATE_VERTEX":                     uint64(VertexInputRateVertex),
 		"VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT": DebugUtilsMessageSeverityWarningBitEXT,
 		"VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT":   DebugUtilsMessageSeverityErrorBitEXT,
 		"VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT":  DebugUtilsMessageTypeValidationBitEXT,

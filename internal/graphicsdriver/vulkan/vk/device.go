@@ -39,7 +39,7 @@ type Device struct {
 		createShaderModule, destroyShaderModule                                        uintptr
 		createImageView, destroyImageView, createPipelineLayout, destroyPipelineLayout uintptr
 		createGraphicsPipelines, destroyPipeline, cmdBeginRendering, cmdEndRendering   uintptr
-		cmdBindPipeline, cmdSetViewport, cmdSetScissor, cmdDraw                        uintptr
+		cmdBindPipeline, cmdSetViewport, cmdSetScissor, cmdDraw, cmdBindVertexBuffers  uintptr
 	}
 }
 
@@ -93,6 +93,7 @@ func newDevice(instance Instance, handle uintptr) (*Device, error) {
 		{"vkCmdSetViewport", &d.fn.cmdSetViewport},
 		{"vkCmdSetScissor", &d.fn.cmdSetScissor},
 		{"vkCmdDraw", &d.fn.cmdDraw},
+		{"vkCmdBindVertexBuffers", &d.fn.cmdBindVertexBuffers},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(get, handle, uintptr(unsafe.Pointer(n)))

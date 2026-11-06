@@ -126,6 +126,32 @@ type PipelineVertexInputStateCreateInfo struct {
 	PVertexAttributeDescriptions    uintptr
 }
 
+// VertexInputBindingDescription is VkVertexInputBindingDescription.
+type VertexInputBindingDescription struct {
+	Binding, Stride, InputRate uint32
+}
+
+// VertexInputAttributeDescription is VkVertexInputAttributeDescription.
+type VertexInputAttributeDescription struct {
+	Location, Binding, Format, Offset uint32
+}
+
+// VertexInputRateVertex: a binding advances per vertex.
+const VertexInputRateVertex uint32 = 0
+
+// Vertex attribute formats.
+const (
+	FormatR32G32Sfloat       uint32 = 103
+	FormatR32G32B32A32Sfloat uint32 = 109
+)
+
+// VertexLayout is a pipeline's vertex input: one binding (0) of Stride bytes
+// per vertex, read as Attributes (their Binding ignored: always 0).
+type VertexLayout struct {
+	Stride     uint32
+	Attributes []VertexInputAttributeDescription
+}
+
 // PipelineInputAssemblyStateCreateInfo is VkPipelineInputAssemblyStateCreateInfo.
 type PipelineInputAssemblyStateCreateInfo struct {
 	SType                  StructureType
@@ -304,10 +330,10 @@ func (d *Device) DestroyPipelineLayout(l PipelineLayout) {
 
 // CreateGraphicsPipeline is vkCreateGraphicsPipelines of one pipeline for
 // dynamic rendering into one colour attachment of a format: a vertex and a
-// fragment shader ("main" each), no vertex input, triangle lists, filled and
-// not culled, one sample, blending off, viewport and scissor set while
-// recording.
-func (d *Device) CreateGraphicsPipeline(layout PipelineLayout, vertex, fragment ShaderModule, colorFormat uint32) (Pipeline, error) {
+// fragment shader ("main" each), the vertex input of vertices (nil: none —
+// the shader makes its own positions), triangle lists, filled and not
+// culled, one sample, blending off, viewport and scissor set while recording.
+func (d *Device) CreateGraphicsPipeline(layout PipelineLayout, vertex, fragment ShaderModule, vertices *VertexLayout, colorFormat uint32) (Pipeline, error) {
 	var pinner runtime.Pinner
 	defer pinner.Unpin()
 	pin := func(p any) { pinner.Pin(p) }
@@ -320,6 +346,18 @@ func (d *Device) CreateGraphicsPipeline(layout PipelineLayout, vertex, fragment 
 	}
 	pin(&stages[0])
 	vertexInput := &PipelineVertexInputStateCreateInfo{SType: StructureTypePipelineVertexInputStateCreateInfo}
+	if vertices != nil && len(vertices.Attributes) > 0 {
+		binding := &VertexInputBindingDescription{Stride: vertices.Stride, InputRate: VertexInputRateVertex}
+		attrs := make([]VertexInputAttributeDescription, len(vertices.Attributes))
+		for i, a := range vertices.Attributes {
+			a.Binding = 0
+			attrs[i] = a
+		}
+		pin(binding)
+		pin(&attrs[0])
+		vertexInput.VertexBindingDescriptionCount, vertexInput.PVertexBindingDescriptions = 1, uintptr(unsafe.Pointer(binding))
+		vertexInput.VertexAttributeDescriptionCount, vertexInput.PVertexAttributeDescriptions = uint32(len(attrs)), uintptr(unsafe.Pointer(&attrs[0]))
+	}
 	inputAssembly := &PipelineInputAssemblyStateCreateInfo{SType: StructureTypePipelineInputAssemblyStateCreateInfo, Topology: PrimitiveTopologyTriangleList}
 	viewport := &PipelineViewportStateCreateInfo{SType: StructureTypePipelineViewportStateCreateInfo, ViewportCount: 1, ScissorCount: 1}
 	raster := &PipelineRasterizationStateCreateInfo{SType: StructureTypePipelineRasterizationStateCreateInfo, LineWidth: 1}
@@ -389,6 +427,13 @@ func (d *Device) CmdSetViewport(cb CommandBuffer, v Viewport) {
 func (d *Device) CmdSetScissor(cb CommandBuffer, r Rect2D) {
 	purego.SyscallN(d.fn.cmdSetScissor, uintptr(cb), 0, 1, uintptr(unsafe.Pointer(&r)))
 	runtime.KeepAlive(&r)
+}
+
+// CmdBindVertexBuffer is vkCmdBindVertexBuffers of one buffer at binding 0.
+func (d *Device) CmdBindVertexBuffer(cb CommandBuffer, b Buffer, offset uint64) {
+	purego.SyscallN(d.fn.cmdBindVertexBuffers, uintptr(cb), 0, 1, uintptr(unsafe.Pointer(&b)), uintptr(unsafe.Pointer(&offset)))
+	runtime.KeepAlive(&b)
+	runtime.KeepAlive(&offset)
 }
 
 // CmdDraw is vkCmdDraw.
