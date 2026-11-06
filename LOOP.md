@@ -57,6 +57,13 @@ V7. [x] (DONE 2026-11-06: mempool_linbsd.go — 64 MiB blocks per memory type, a
 V8. [x] (DONE 2026-11-06: internal/graphicsdriver/vulkan/frametime + frametime.sh — scenes sprites (N small images) and shader (full-screen Kage), vsync off, warm-up, mean / p95 ms per frame, both drivers; lavapipe here is CPU so its numbers mean nothing for GPUs — the real run waits on a GPU box, see Questions) **Frame times against OpenGL**: a benchmark harness (goloco's title and examples/2048 for N frames, both
     drivers) printing ms / frame, so a real-GPU run (Crostini, or any Vulkan box) gives numbers to compare.
 
+V9. [x] (DONE 2026-11-06) **Narrow barriers, checked by synchronization validation**: image layout transitions waited on
+    all commands and all memory (a PARTIAL note); now each layout's own stage and access (transfer, fragment shader,
+    colour attachment; only the old side's writes made visible). Running with VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true
+    found a hazard that was there before (6 in the driver tests): a clear, or an earlier copy, then a copy into the
+    same image in the same layout with no barrier between — Image.settle orders them. Driver tests, ebiten, vector,
+    text/v2, colorm green on Vulkan with sync validation, no hazards.
+
 ## Questions for Joop
 - (TO TRY, whenever) On a machine with a GPU (Crostini too): `sh internal/graphicsdriver/vulkan/frametime/frametime.sh`
   on branch vulkan prints OpenGL vs Vulkan ms / frame for two scenes — paste the lines back.
@@ -131,4 +138,5 @@ V8. [x] (DONE 2026-11-06: internal/graphicsdriver/vulkan/frametime + frametime.s
 - 2026-11-06 (queue refreshed, Joop's word) — "Don't wait on anything for me to try": V6 checked off (goloco and GameViber run on Vulkan here, identical to OpenGL; Crostini stays a thing for him to try), V4 marked done as DESIGN.md records it; new work from DESIGN's open list: V7 images suballocated, V8 a frame-time harness. Ticks no longer pass this project by.
 - 2026-11-06 — V7 done: images suballocated from shared blocks (mempool_linbsd.go); TestSpans + TestImagesShareMemory (1 MiB blocks: 10 images over ≥3 blocks, pixels kept, one block left after disposing; validation silent); ebiten, text, vector, colorm, ebitenutil, the driver: all ok on Vulkan.
 - 2026-11-06 — V8 done: the frametime harness (sprites / shader scenes, vsync off, mean + p95, one line per driver) and frametime.sh for both drivers. Smoke run on Xvfb (OpenGL on llvmpipe, Vulkan on lavapipe — both CPU): sprites 3000 × 300 frames 56.8 vs 84.6 ms, shader 64.7 vs 54.5 ms; meaningful numbers need a GPU.
+- 2026-11-06 — V9: narrow per-layout barriers; synchronization validation found a pre-existing write-after-write (clear / copy then copy in the same layout) — fixed with Image.settle; driver + ebiten + vector + text/v2 + colorm green with sync validation, no hazards.
 

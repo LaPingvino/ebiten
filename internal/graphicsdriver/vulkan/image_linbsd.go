@@ -33,7 +33,7 @@ type Image struct {
 	width  int
 	height int
 	image  vk.Image
-	mem    memAlloc // in a shared block (mempool_linbsd.go) or its own
+	mem    memAlloc     // in a shared block (mempool_linbsd.go) or its own
 	view   vk.ImageView // made on first draw
 	layout uint32
 }
@@ -96,16 +96,51 @@ func (i *Image) Dispose() {
 	g.release(free)
 }
 
-// transition records a barrier moving the image to layout, after and before
-// any work (PARTIAL: all-commands, all-memory scopes; narrower ones later).
+// layoutUse is what uses an image in a layout: the pipeline stage, what it
+// reads and writes there, and (for the source side of a barrier) only the
+// writes, which are all that must be made visible (LOOP V9).
+func layoutUse(layout uint32) (stage, access, writes uint64) {
+	switch layout {
+	case vk.ImageLayoutUndefined: // its contents are discarded: nothing to wait for
+		return vk.PipelineStage2None, vk.Access2None, vk.Access2None
+	case vk.ImageLayoutTransferDstOptimal:
+		return vk.PipelineStage2AllTransfer, vk.Access2TransferWrite, vk.Access2TransferWrite
+	case vk.ImageLayoutTransferSrcOptimal:
+		return vk.PipelineStage2AllTransfer, vk.Access2TransferRead, vk.Access2None
+	case vk.ImageLayoutShaderReadOnlyOptimal:
+		return vk.PipelineStage2FragmentShader, vk.Access2ShaderRead, vk.Access2None
+	case vk.ImageLayoutColorAttachmentOptimal: // blending reads the attachment too
+		return vk.PipelineStage2ColorAttachmentOutput, vk.Access2ColorAttachmentRead | vk.Access2ColorAttachmentWrite, vk.Access2ColorAttachmentWrite
+	}
+	return vk.PipelineStage2AllCommands, vk.Access2MemoryRead | vk.Access2MemoryWrite, vk.Access2MemoryWrite
+}
+
+// settle orders a transfer write after the transfer writes before it in the
+// same layout (found by the validation layer's synchronization checks).
+func (i *Image) settle(cb vk.CommandBuffer) {
+	i.g.closeRendering(cb)
+	i.g.device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
+		SrcStageMask: vk.PipelineStage2AllTransfer, SrcAccessMask: vk.Access2TransferWrite,
+		DstStageMask: vk.PipelineStage2AllTransfer, DstAccessMask: vk.Access2TransferWrite | vk.Access2TransferRead,
+		OldLayout: i.layout, NewLayout: i.layout,
+		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
+		Image: i.image, SubresourceRange: vk.ColorRange,
+	})
+}
+
+// transition records a barrier moving the image to layout: after the stage
+// that last used it (its writes made visible), before the stage that uses it
+// next.
 func (i *Image) transition(cb vk.CommandBuffer, layout uint32) {
 	if i.layout == layout {
 		return
 	}
 	i.g.closeRendering(cb) // no layout change inside a rendering pass
+	srcStage, _, srcWrites := layoutUse(i.layout)
+	dstStage, dstAccess, _ := layoutUse(layout)
 	i.g.device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
-		SrcStageMask: vk.PipelineStage2AllCommands, SrcAccessMask: vk.Access2MemoryWrite,
-		DstStageMask: vk.PipelineStage2AllCommands, DstAccessMask: vk.Access2MemoryRead | vk.Access2MemoryWrite,
+		SrcStageMask: srcStage, SrcAccessMask: srcWrites,
+		DstStageMask: dstStage, DstAccessMask: dstAccess,
 		OldLayout: i.layout, NewLayout: layout,
 		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored,
 		Image: i.image, SubresourceRange: vk.ColorRange,
@@ -157,7 +192,11 @@ func (i *Image) WritePixels(args []graphicsdriver.PixelsArgs) error {
 		i.transition(cb, vk.ImageLayoutTransferDstOptimal)
 		g.device.CmdClearColorImage(cb, i.image, vk.ImageLayoutTransferDstOptimal, [4]float32{})
 	}
-	i.transition(cb, vk.ImageLayoutTransferDstOptimal)
+	if i.layout == vk.ImageLayoutTransferDstOptimal {
+		i.settle(cb) // a clear or an earlier copy wrote it in this layout: no transition to order them
+	} else {
+		i.transition(cb, vk.ImageLayoutTransferDstOptimal)
+	}
 	g.closeRendering(cb)
 	g.device.CmdCopyBufferToImage(cb, staging.buf, i.image, vk.ImageLayoutTransferDstOptimal, copies...)
 	return nil

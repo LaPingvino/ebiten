@@ -66,6 +66,9 @@ const (
 	Access2HostRead      uint64 = 0x2000
 	Access2MemoryRead    uint64 = 0x8000
 	Access2MemoryWrite   uint64 = 0x10000
+
+	Access2ShaderRead          uint64 = 0x20
+	Access2ColorAttachmentRead uint64 = 0x80
 )
 
 // Extent3D is VkExtent3D; Offset3D VkOffset3D.
