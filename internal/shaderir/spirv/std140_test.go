@@ -96,3 +96,51 @@ func TestStd140MatchesGlslang(t *testing.T) {
 		t.Errorf("offsets %v (%v), glslang's %v", offs, err, want)
 	}
 }
+
+// PackStd140: tightly packed values land at their std140 offsets with zero
+// padding — a float, a vec3 (padded to 16), a float in the vec3's last 4
+// bytes, a mat3 (columns at 16-byte strides), a float[3] (stride 16) — and the
+// projection's row 1 is negated in every column.
+func TestPackStd140(t *testing.T) {
+	types := []shaderir.Type{{Main: shaderir.Float}, {Main: shaderir.Vec3}, {Main: shaderir.Float}, {Main: shaderir.Mat3}, arr(shaderir.Float, 3)}
+	var src []uint32
+	for i := 1; i <= 1+3+1+9+3; i++ {
+		src = append(src, uint32(i))
+	}
+	got, err := spirv.PackStd140([]uint32{0xAA}, types, src, -1) // appended after what's there
+	if err != nil {
+		t.Fatal(err)
+	}
+	// dwords: float@0; vec3@4..6; float@7; mat3 cols @8,12,16 (3 each); float[3] @20,24,28; size 32 dwords (128 bytes)
+	want := make([]uint32, 32)
+	want[0] = 1
+	copy(want[4:], []uint32{2, 3, 4})
+	want[7] = 5
+	copy(want[8:], []uint32{6, 7, 8})
+	copy(want[12:], []uint32{9, 10, 11})
+	copy(want[16:], []uint32{12, 13, 14})
+	want[20], want[24], want[28] = 15, 16, 17
+	if got[0] != 0xAA || !slices.Equal(got[1:], want) {
+		t.Errorf("packed %v\nwant  %v", got[1:], want)
+	}
+
+	m := []uint32{0x3f800000, 0x40000000, 0, 0, 0, 0x3f800000, 0, 0, 0, 0, 0x3f800000, 0, 0x40400000, 0xbf800000, 0, 0x3f800000}
+	got, err = spirv.PackStd140(nil, []shaderir.Type{{Main: shaderir.Mat4}}, m, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for c := 0; c < 4; c++ {
+		for r := 0; r < 4; r++ {
+			w := m[c*4+r]
+			if r == 1 {
+				w ^= 1 << 31
+			}
+			if got[c*4+r] != w {
+				t.Errorf("projection column %d row %d: %#x, want %#x", c, r, got[c*4+r], w)
+			}
+		}
+	}
+	if _, err := spirv.PackStd140(nil, types, src[:5], -1); err == nil {
+		t.Error("too few dwords accepted")
+	}
+}

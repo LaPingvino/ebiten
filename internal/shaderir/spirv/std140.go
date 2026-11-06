@@ -101,3 +101,69 @@ func std140Members(members []shaderir.Type) (offsets []int, size, align int, err
 	}
 	return offsets, size, align, nil
 }
+
+// PackStd140 appends Ebitengine's uniforms — packed tightly, each taking its
+// type's DwordCount, matrices column-major — to dst in the std140 block
+// layout of Std140Offsets (zero padding between members, matrix columns and
+// array elements at 16-byte strides), the block's whole size. The uniform at
+// flipY (Ebitengine's projection matrix; −1 none) has its second row negated:
+// Vulkan's clip-space Y points down where OpenGL's points up (DESIGN.md, as
+// the Metal driver does).
+func PackStd140(dst []uint32, types []shaderir.Type, uniforms []uint32, flipY int) ([]uint32, error) {
+	offsets, size, err := Std140Offsets(types)
+	if err != nil {
+		return nil, err
+	}
+	base := len(dst)
+	dst = append(dst, make([]uint32, size/4)...)
+	block := dst[base:]
+	idx := 0
+	for i, t := range types {
+		n := t.DwordCount()
+		if n < 0 || idx+n > len(uniforms) {
+			return nil, fmt.Errorf("spirv: uniform %d (%s): %d dwords given, %d needed", i, t.String(), len(uniforms)-idx, n)
+		}
+		if err := packOne(block[offsets[i]/4:], t, uniforms[idx:idx+n]); err != nil {
+			return nil, err
+		}
+		if i == flipY && t.Main == shaderir.Mat4 {
+			for col := 0; col < 4; col++ {
+				block[offsets[i]/4+col*4+1] ^= 1 << 31 // the float's sign: row 1 of each column
+			}
+		}
+		idx += n
+	}
+	return dst, nil
+}
+
+// packOne writes one value of type t (its tightly packed dwords src) at the
+// start of dst in std140.
+func packOne(dst []uint32, t shaderir.Type, src []uint32) error {
+	switch t.Main {
+	case shaderir.Bool, shaderir.Int, shaderir.Float, shaderir.Vec2, shaderir.Vec3, shaderir.Vec4,
+		shaderir.IVec2, shaderir.IVec3, shaderir.IVec4, shaderir.Mat4:
+		copy(dst, src)
+	case shaderir.Mat2, shaderir.Mat3: // columns at a 16-byte (4-dword) stride
+		n := 2
+		if t.Main == shaderir.Mat3 {
+			n = 3
+		}
+		for c := 0; c < n; c++ {
+			copy(dst[c*4:c*4+n], src[c*n:c*n+n])
+		}
+	case shaderir.Array:
+		stride, err := Std140ArrayStride(t)
+		if err != nil {
+			return err
+		}
+		en := t.Sub[0].DwordCount()
+		for e := 0; e < t.Length; e++ {
+			if err := packOne(dst[e*stride/4:], t.Sub[0], src[e*en:e*en+en]); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("spirv: no std140 packing for %s", t.String())
+	}
+	return nil
+}
