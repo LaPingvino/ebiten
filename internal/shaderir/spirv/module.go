@@ -49,6 +49,7 @@ const (
 	opTypeImage              = 25
 	opTypeSampledImage       = 27
 	opVectorShuffle          = 79
+	opConstantNull           = 46
 	opConvertFToS            = 110
 	opLoopMerge              = 246
 	opUnreachable            = 255
@@ -414,6 +415,11 @@ func (f *Function) BranchConditional(cond, ifTrue, ifFalse uint32) {
 
 // Phi is a value by the block control came from: pairs of (value, label).
 func (f *Function) Phi(typ uint32, pairs ...uint32) uint32 { return f.op(opPhi, typ, pairs...) }
+
+// ConstantNull is the zero value of a type (OpConstantNull).
+func (m *Module) ConstantNull(typ uint32) uint32 {
+	return m.typeID(key("cnull", typ), func(id uint32) { inst(&m.types, opConstantNull, typ, id) })
+}
 
 // ConstantBool is true or false.
 func (m *Module) ConstantBool(v bool) uint32 {

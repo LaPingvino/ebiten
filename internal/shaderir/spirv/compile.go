@@ -178,6 +178,9 @@ func CompileVertex(p *shaderir.Program) ([]uint32, error) {
 		interfaces = append(interfaces, c.uniforms) // SPIR-V 1.4+: every global the entry point uses
 	}
 	block := p.VertexFunc.Block
+	if block == nil {
+		return nil, fmt.Errorf("spirv: the program has no vertex function")
+	}
 	if err := c.userFuncs(block); err != nil {
 		return nil, err
 	}
@@ -302,6 +305,20 @@ func (c *compiler) stmts(f *Function, b *shaderir.Block) (ended bool, err error)
 			}
 			f.Return()
 			return true, nil
+		case shaderir.ExprStmt: // a call for its effects; the value dropped
+			if _, err := c.expr(f, s.Exprs[0]); err != nil {
+				return false, err
+			}
+		case shaderir.Init: // var x T: the zero value
+			v, ok := c.vars[s.InitIndex]
+			if !ok {
+				return false, fmt.Errorf("spirv: init of an unknown local %d", s.InitIndex)
+			}
+			st, err := c.typ(v.typ)
+			if err != nil {
+				return false, err
+			}
+			f.Store(v.ptr, c.m.ConstantNull(st))
 		case shaderir.BlockStmt:
 			if ended, err := c.stmts(f, s.Blocks[0]); err != nil || ended {
 				return ended, err
@@ -619,6 +636,9 @@ func CompileFragment(p *shaderir.Program) ([]uint32, error) {
 		interfaces = append(interfaces, c.uniforms)
 	}
 	block := p.FragmentFunc.Block
+	if block == nil {
+		return nil, fmt.Errorf("spirv: the program has no fragment function")
+	}
 	if err := c.userFuncs(block); err != nil {
 		return nil, err
 	}
@@ -785,9 +805,6 @@ func (c *compiler) funcByIndex(idx int) *shaderir.Func {
 // copied into a Function variable, so the body may assign it), its locals,
 // its body. PARTIAL: out-parameters.
 func (c *compiler) userFunc(fn *shaderir.Func) error {
-	if len(fn.OutParams) > 0 {
-		return fmt.Errorf("spirv: out-parameters (function %d) not supported yet", fn.Index)
-	}
 	ret := c.m.TypeVoid()
 	if fn.Return.Main != shaderir.None {
 		var err error
@@ -795,12 +812,21 @@ func (c *compiler) userFunc(fn *shaderir.Func) error {
 			return err
 		}
 	}
-	params := make([]uint32, len(fn.InParams))
+	params := make([]uint32, len(fn.InParams), len(fn.InParams)+len(fn.OutParams))
 	for i, t := range fn.InParams {
 		var err error
 		if params[i], err = c.typ(t); err != nil {
 			return err
 		}
+	}
+	outTypes := make([]uint32, len(fn.OutParams)) // out-parameters: pointers to the caller's Function variables
+	for j, t := range fn.OutParams {
+		st, err := c.typ(t)
+		if err != nil {
+			return err
+		}
+		outTypes[j] = st
+		params = append(params, c.m.TypePointer(StorageClassFunction, st))
 	}
 	saved, savedResult, savedIn := c.vars, c.result, c.inFunc
 	c.vars, c.result, c.inFunc = map[int]variable{}, 0, true
@@ -816,6 +842,10 @@ func (c *compiler) userFunc(fn *shaderir.Func) error {
 			ptr := f.LocalVariable(c.m.TypePointer(StorageClassFunction, params[i]))
 			c.vars[i] = variable{ptr: ptr, typ: t, storage: StorageClassFunction}
 		}
+		for j, t := range fn.OutParams { // written straight through the pointer
+			c.vars[len(fn.InParams)+j] = variable{ptr: ids[len(fn.InParams)+j], typ: t, storage: StorageClassFunction}
+		}
+		_ = outTypes
 		for i, t := range fn.Block.LocalVars {
 			if t.Main == shaderir.None { // a for loop's counter: the for declares it, with its type
 				continue
@@ -850,7 +880,26 @@ func (c *compiler) callUser(f *Function, idx int, args []shaderir.Expr) (value, 
 		return value{}, fmt.Errorf("spirv: function %d not compiled", idx)
 	}
 	var ids []uint32
-	for _, a := range args {
+	for i, a := range args {
+		if i >= len(fn.InParams) { // an out-argument: the caller's variable itself
+			if a.Type != shaderir.LocalVariable {
+				return value{}, fmt.Errorf("spirv: an out-argument of expression type %d", a.Type)
+			}
+			v, ok := c.vars[a.Index]
+			if !ok || v.storage != StorageClassFunction {
+				return value{}, fmt.Errorf("spirv: an out-argument into local %d (not a Function variable) not supported yet", a.Index)
+			}
+			ids = append(ids, v.ptr)
+			continue
+		}
+		if a.Type == shaderir.NumberExpr && i < len(fn.InParams) && (fn.InParams[i].Main == shaderir.Int || fn.InParams[i].Main == shaderir.Float) {
+			id, err := c.forConst(fn.InParams[i], a.Const) // an untyped number takes the parameter's type
+			if err != nil {
+				return value{}, err
+			}
+			ids = append(ids, id)
+			continue
+		}
 		v, err := c.expr(f, a)
 		if err != nil {
 			return value{}, err
@@ -1150,4 +1199,42 @@ func (c *compiler) convert(f *Function, fn shaderir.BuiltinFunc, arg shaderir.Ex
 		return value{f.op(opConvertFToS, tt, v.id), to}, nil
 	}
 	return value{}, fmt.Errorf("spirv: %s(%s) not supported yet", fn, v.typ.String())
+}
+
+// CompileLibrary compiles every function of a program — reachable or not —
+// into one module with an empty fragment entry point: for checking the
+// backend's coverage of the language (and validating it) on programs that are
+// only functions, like the shader package's test programs.
+func CompileLibrary(p *shaderir.Program) ([]uint32, error) {
+	c := newCompiler(p)
+	if err := c.uniformBlock(); err != nil {
+		return nil, err
+	}
+	for i := range p.Funcs {
+		fn := &p.Funcs[i]
+		if _, done := c.funcs[fn.Index]; done {
+			continue
+		}
+		if err := c.userFuncs(fn.Block); err != nil { // its callees first
+			return nil, err
+		}
+		if _, done := c.funcs[fn.Index]; done {
+			continue
+		}
+		if err := c.userFunc(fn); err != nil {
+			return nil, fmt.Errorf("function %d: %w", fn.Index, err)
+		}
+	}
+	void := c.m.TypeVoid()
+	main := c.m.Function(void, c.m.TypeFunction(void), func(f *Function) {
+		f.Label()
+		f.Return()
+	})
+	ifaces := c.texList
+	if c.uniforms != 0 {
+		ifaces = append(ifaces, c.uniforms)
+	}
+	c.m.EntryPoint(ExecutionModelFragment, main, "main", ifaces...)
+	c.m.ExecutionMode(main, ExecutionModeOriginUpperLeft)
+	return c.m.Words(), nil
 }
