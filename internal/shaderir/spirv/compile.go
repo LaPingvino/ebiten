@@ -48,6 +48,7 @@ type compiler struct {
 	uniforms uint32 // the uniform block's variable (0: none)
 	vars     map[int]variable
 	types    map[shaderir.BasicType]uint32
+	result   uint32 // the fragment function's output (Location 0): where a returned value goes; 0 in the vertex function
 }
 
 func newCompiler(p *shaderir.Program) *compiler {
@@ -215,7 +216,17 @@ func (c *compiler) block(f *Function, b *shaderir.Block) error {
 			f.Store(v.ptr, rhs.id)
 		case shaderir.Return:
 			if len(s.Exprs) > 0 {
-				return fmt.Errorf("spirv: returning a value not supported yet")
+				if c.result == 0 {
+					return fmt.Errorf("spirv: a returned value outside the fragment function")
+				}
+				v, err := c.expr(f, s.Exprs[0])
+				if err != nil {
+					return err
+				}
+				if v.typ.Main != shaderir.Vec4 {
+					return fmt.Errorf("spirv: the fragment function returns %s, not vec4", v.typ.String())
+				}
+				f.Store(c.result, v.id)
 			}
 			f.Return()
 			return nil
@@ -307,4 +318,59 @@ func (c *compiler) expr(f *Function, e shaderir.Expr) (value, error) {
 		return value{}, fmt.Errorf("spirv: operator %d on %s and %s not supported yet", e.Op, l.typ.String(), r.typ.String())
 	}
 	return value{}, fmt.Errorf("spirv: expression type %d not supported yet", e.Type)
+}
+
+// CompileFragment is the program's fragment function as a SPIR-V module
+// (entry point "main", OriginUpperLeft). Its local 0 is the destination
+// position — gl_FragCoord as it is: Vulkan's is top-down in pixels, like
+// Metal's [[position]] (OpenGL's backend flips it only for its window); the
+// varyings follow (Input, Locations 0…), then the function's own locals; the
+// returned colour goes to Output Location 0.
+func CompileFragment(p *shaderir.Program) ([]uint32, error) {
+	c := newCompiler(p)
+	if err := c.uniformBlock(); err != nil {
+		return nil, err
+	}
+	vec4 := shaderir.Type{Main: shaderir.Vec4}
+	pos, _ := c.global(vec4, StorageClassInput)
+	c.m.Decorate(pos, DecorationBuiltIn, BuiltInFragCoord)
+	c.vars[0] = variable{ptr: pos, typ: vec4, storage: StorageClassInput, input: true}
+	interfaces := []uint32{pos}
+	nv := len(p.Varyings)
+	for i, t := range p.Varyings {
+		v, err := c.global(t, StorageClassInput)
+		if err != nil {
+			return nil, err
+		}
+		c.m.Decorate(v, DecorationLocation, uint32(i))
+		c.vars[1+i] = variable{ptr: v, typ: t, storage: StorageClassInput, input: true}
+		interfaces = append(interfaces, v)
+	}
+	c.result, _ = c.global(vec4, StorageClassOutput)
+	c.m.Decorate(c.result, DecorationLocation, 0)
+	interfaces = append(interfaces, c.result)
+	if c.uniforms != 0 {
+		interfaces = append(interfaces, c.uniforms)
+	}
+	block := p.FragmentFunc.Block
+	void := c.m.TypeVoid()
+	var bodyErr error
+	main := c.m.Function(void, c.m.TypeFunction(void), func(f *Function) {
+		f.Label()
+		for i, t := range block.LocalVars {
+			st, err := c.typ(t)
+			if err != nil {
+				bodyErr = err
+				return
+			}
+			c.vars[1+nv+i] = variable{ptr: f.LocalVariable(c.m.TypePointer(StorageClassFunction, st)), typ: t, storage: StorageClassFunction}
+		}
+		bodyErr = c.block(f, block)
+	})
+	if bodyErr != nil {
+		return nil, bodyErr
+	}
+	c.m.EntryPoint(ExecutionModelFragment, main, "main", interfaces...)
+	c.m.ExecutionMode(main, ExecutionModeOriginUpperLeft)
+	return c.m.Words(), nil
 }

@@ -59,3 +59,17 @@ func TestCompileVertexUnsupported(t *testing.T) {
 		t.Errorf("an unknown statement: %v", err)
 	}
 }
+
+// The red Kage program's fragment function (return vec4(1, 0, 0, 1))
+// compiles to a module spirv-val accepts.
+func TestCompileFragmentConstant(t *testing.T) {
+	p, err := graphics.CompileShader([]byte(redKage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs, err := spirv.CompileFragment(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validate(t, wordsToBytes(fs))
+}

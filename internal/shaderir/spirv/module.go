@@ -97,6 +97,7 @@ const (
 	DecorationOffset        = 35
 
 	BuiltInPosition    = 0
+	BuiltInFragCoord   = 15
 	BuiltInVertexIndex = 42
 )
 

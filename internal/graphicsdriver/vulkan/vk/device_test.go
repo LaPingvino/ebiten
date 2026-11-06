@@ -1119,3 +1119,68 @@ func greenFragment(t *testing.T, device *vk.Device) vk.ShaderModule {
 	}
 	return fs
 }
+
+// Kage end to end: both stages compiled from a Kage program by the SPIR-V
+// backend and drawn on lavapipe — the red program (return vec4(1, 0, 0, 1))
+// paints its quad red; "return color" paints the vertices' colour (the
+// varying from the vertex stage, at its Location), green here.
+func TestKageEndToEnd(t *testing.T) {
+	const n = 16
+	src := make([]uint32, 46)
+	for i, f := range []float32{2.0 / n, 0, 0, 0, 0, 2.0 / n, 0, 0, 0, 0, 1, 0, -1, -1, 0, 1} {
+		src[30+i] = math.Float32bits(f)
+	}
+	for _, c := range []struct {
+		body   string
+		colour [4]float32
+		want   [4]byte
+	}{
+		{"return vec4(1, 0, 0, 1)", [4]float32{0, 0, 1, 1}, [4]byte{255, 0, 0, 255}},
+		{"return color", [4]float32{0, 1, 0, 1}, [4]byte{0, 255, 0, 255}},
+	} {
+		p, err := graphics.CompileShader([]byte("//kage:unit pixels\npackage main\nfunc Fragment(dst vec4, src vec2, color vec4) vec4 { " + c.body + " }\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		vsWords, err := spirv.CompileVertex(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fsWords, err := spirv.CompileFragment(p)
+		if err != nil {
+			t.Fatalf("%s: %v", c.body, err)
+		}
+		packed, err := spirv.PackStd140(nil, p.Uniforms, src, -1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uniforms := make([]float32, len(packed))
+		for i, w := range packed {
+			uniforms[i] = math.Float32frombits(w)
+		}
+		px := drawScene(t, n, n, func(device *vk.Device) scene {
+			vs, err := device.CreateShaderModule(vsWords)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fs, err := device.CreateShaderModule(fsWords)
+			if err != nil {
+				t.Fatal(err)
+			}
+			col := c.colour
+			v := func(x, y float32) []float32 { return []float32{x, y, 0, 0, col[0], col[1], col[2], col[3], 0, 0, 0, 0} }
+			verts := slices.Concat(v(0, 0), v(16, 0), v(0, 8), v(16, 8))
+			return scene{vs: vs, fs: fs, layout: ebitengineVertex, vertices: verts, indices: []uint32{0, 1, 2, 1, 2, 3},
+				uniforms: uniforms, uniformRange: uint64(len(packed) * 4)}
+		})
+		for y := 0; y < n; y++ {
+			for x := 0; x < n; x++ {
+				i := (y*n + x) * 4
+				got := [4]byte(px[i : i+4])
+				if want := y < n/2; (got == c.want) != want {
+					t.Fatalf("%s: pixel %d,%d: %v (%v expected: %v)", c.body, x, y, got, c.want, want)
+				}
+			}
+		}
+	}
+}
