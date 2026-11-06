@@ -211,6 +211,10 @@ func (*graphicsDriverCreatorImpl) newPlayStation5() (graphicsdriver.Graphics, er
 	return nil, errors.New("ui: PlayStation 5 is not supported in this environment")
 }
 
+func (*graphicsDriverCreatorImpl) newVulkan() (graphicsdriver.Graphics, error) {
+	return nil, errors.New("ui: Vulkan is not supported in this environment")
+}
+
 func dipToNativePixels(x float64, scale float64) float64 {
 	return x * scale
 }

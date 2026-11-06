@@ -21,6 +21,7 @@ package vulkan
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/hajimehoshi/ebiten/v2/internal/color"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
@@ -81,6 +82,10 @@ func NewGraphics(colorSpace color.ColorSpace) (graphicsdriver.Graphics, error) {
 func (g *Graphics) Initialize() error {
 	if v, err := vk.EnumerateInstanceVersion(); err != nil || v < vk.APIVersion13 {
 		return fmt.Errorf("vulkan: no Vulkan 1.3 loader (%v)", err)
+	}
+	if debugCallback == nil && os.Getenv("EBITENGINE_VULKAN_VALIDATION") == "1" {
+		// The validation layer for a game or Ebitengine's tests: its messages on stderr.
+		debugCallback = func(m vk.DebugMessage) { fmt.Fprintf(os.Stderr, "vulkan validation: %s: %s\n", m.ID, m.Text) }
 	}
 	var exts, layers []string
 	if debugCallback != nil {
@@ -212,8 +217,10 @@ func (g *Graphics) runAfterBatch() {
 
 func (g *Graphics) SetTransparent(transparent bool) {}
 
+// NewScreenFramebufferImage is, until the swapchain (V5), an offscreen image:
+// games run and draw, nothing is presented.
 func (g *Graphics) NewScreenFramebufferImage(width, height int) (graphicsdriver.Image, error) {
-	return nil, errors.New("vulkan: the screen is not implemented yet (V5)")
+	return g.newImage(width, height) // the screen: its exact size
 }
 
 func (g *Graphics) SetVsyncEnabled(enabled bool) {}

@@ -48,6 +48,10 @@ func (*graphicsDriverCreatorImpl) newPlayStation5() (graphicsdriver.Graphics, er
 	return playstation5.NewGraphics()
 }
 
+func (*graphicsDriverCreatorImpl) newVulkan() (graphicsdriver.Graphics, error) {
+	return nil, errors.New("ui: Vulkan is not supported in this environment")
+}
+
 const (
 	// TODO: Get this value from the SDK.
 	screenWidth  = 3840

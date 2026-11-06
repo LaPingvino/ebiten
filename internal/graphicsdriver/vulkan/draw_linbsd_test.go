@@ -30,12 +30,17 @@ import (
 // preserved is Ebitengine's preserved uniforms as graphicscommand's
 // prependPreservedUniforms makes them: the sizes, the regions, the
 // projection.
-func preserved(dw, dh int, src0 image.Rectangle, sw, sh int) []uint32 {
+// The sizes are the images' internal ones (graphics.InternalImageSize), the
+// destination region the logical one.
+func preserved(w, h int, src0 image.Rectangle, sw, sh int) []uint32 {
 	f := func(v float32) uint32 { return math.Float32bits(v) }
 	u := make([]uint32, graphics.PreservedUniformDwordCount)
+	dw, dh := graphics.InternalImageSize(w), graphics.InternalImageSize(h)
 	u[0], u[1] = f(float32(dw)), f(float32(dh))
-	u[2], u[3] = f(float32(sw)), f(float32(sh))
-	u[12], u[13] = f(float32(dw)), f(float32(dh))
+	if sw > 0 {
+		u[2], u[3] = f(float32(graphics.InternalImageSize(sw))), f(float32(graphics.InternalImageSize(sh)))
+	}
+	u[12], u[13] = f(float32(w)), f(float32(h))
 	u[14], u[15] = f(float32(src0.Min.X)), f(float32(src0.Min.Y))
 	u[22], u[23] = f(float32(src0.Dx())), f(float32(src0.Dy()))
 	for i, v := range []float32{2 / float32(dw), 0, 0, 0, 0, 2 / float32(dh), 0, 0, 0, 0, 1, 0, -1, -1, 0, 1} {
@@ -147,5 +152,68 @@ func Fragment(dst vec4, src vec2, color vec4) vec4 {
 				}
 			}
 		}
+	}
+}
+
+// Ebitengine's sequence in TestImageWritePixelsBetweenDraws, call for call:
+// both images cleared by draws, then the source written, drawn source-over
+// onto the left of the destination, written again and drawn onto its right
+// — one batch, one vertex buffer; the read sees both draws, each with the
+// pixels written just before it.
+func TestWritePixelsBetweenDraws(t *testing.T) {
+	g := testGraphics(t)
+	p, err := graphics.CompileShader(builtinshader.ShaderSource(builtinshader.FilterNearest, builtinshader.AddressUnsafe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := g.NewShader(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, _ := g.NewImage(2, 1)
+	dst, _ := g.NewImage(4, 1)
+	v := func(x, y, sx, sy, c float32) []float32 { return []float32{x, y, sx, sy, c, c, c, c, 0, 0, 0, 0} }
+	var vs []float32
+	for _, q := range [][5]float32{{2, 1, 0, 0, 0}, {4, 1, 0, 0, 0}, {2, 1, 0, 0, 1}, {2, 1, 2, 0, 1}} { // w, h, dst x, -, colour
+		x0 := q[2]
+		sw := float32(2)
+		if q[4] == 0 {
+			x0, sw = 0, 0
+		}
+		vs = append(vs, v(x0, 0, 0, 0, q[4])...)
+		vs = append(vs, v(x0+q[0], 0, sw, 0, q[4])...)
+		vs = append(vs, v(x0, q[1], 0, q[1]*sw/2, q[4])...)
+		vs = append(vs, v(x0+q[0], q[1], sw, q[1]*sw/2, q[4])...)
+	}
+	var is []uint32
+	for k := uint32(0); k < 4; k++ {
+		is = append(is, 4*k, 4*k+1, 4*k+2, 4*k+1, 4*k+2, 4*k+3)
+	}
+	if err := g.SetVertices(vs, is); err != nil {
+		t.Fatal(err)
+	}
+	none := [graphics.ShaderSrcImageCount]graphicsdriver.ImageID{}
+	withSrc := none
+	withSrc[0] = src.ID()
+	draw := func(d graphicsdriver.Image, srcs [graphics.ShaderSrcImageCount]graphicsdriver.ImageID, w, h, off int, blend graphicsdriver.Blend) {
+		t.Helper()
+		if err := g.DrawTriangles(d.ID(), srcs, s.ID(), []graphicsdriver.DstRegion{{Region: image.Rect(0, 0, w, h), IndexCount: 6}}, off, blend, preserved(w, h, image.Rect(0, 0, 2, 1), 2, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	draw(src, none, 2, 1, 0, graphicsdriver.BlendClear)
+	draw(dst, none, 4, 1, 6, graphicsdriver.BlendClear)
+	red := []byte{255, 0, 0, 255, 255, 0, 0, 255}
+	green := []byte{0, 255, 0, 255, 0, 255, 0, 255}
+	if err := src.WritePixels([]graphicsdriver.PixelsArgs{{Pixels: red, Region: image.Rect(0, 0, 2, 1)}}); err != nil {
+		t.Fatal(err)
+	}
+	draw(dst, withSrc, 4, 1, 12, graphicsdriver.BlendSourceOver)
+	if err := src.WritePixels([]graphicsdriver.PixelsArgs{{Pixels: green, Region: image.Rect(0, 0, 2, 1)}}); err != nil {
+		t.Fatal(err)
+	}
+	draw(dst, withSrc, 4, 1, 18, graphicsdriver.BlendSourceOver)
+	if got, want := read(t, dst, image.Rect(0, 0, 4, 1)), append(append([]byte{}, red...), green...); !bytes.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }

@@ -161,11 +161,11 @@ func (g *Graphics) initDrawing() error {
 	if g.sampler, err = g.device.CreateTexelSampler(); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
-	empty, err := g.NewImage(1, 1)
+	empty, err := g.newImage(1, 1)
 	if err != nil {
 		return err
 	}
-	g.emptyImage = empty.(*Image)
+	g.emptyImage = empty
 	delete(g.images, g.emptyImage.id) // the driver's own, not one of Ebitengine's
 	return g.emptyImage.WritePixels([]graphicsdriver.PixelsArgs{{Pixels: make([]byte, 4), Region: g.emptyImage.bounds()}})
 }

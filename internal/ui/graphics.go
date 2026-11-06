@@ -27,6 +27,7 @@ type graphicsDriverCreator interface {
 	newDirectX() (graphicsdriver.Graphics, error)
 	newMetal() (graphicsdriver.Graphics, error)
 	newPlayStation5() (graphicsdriver.Graphics, error)
+	newVulkan() (graphicsdriver.Graphics, error)
 }
 
 func newGraphicsDriver(creator graphicsDriverCreator, graphicsLibrary GraphicsLibrary) (graphicsdriver.Graphics, GraphicsLibrary, error) {
@@ -50,6 +51,8 @@ func newGraphicsDriver(creator graphicsDriverCreator, graphicsLibrary GraphicsLi
 			graphicsLibrary = GraphicsLibraryMetal
 		case "playstation5":
 			graphicsLibrary = GraphicsLibraryPlayStation5
+		case "vulkan":
+			graphicsLibrary = GraphicsLibraryVulkan
 		default:
 			return nil, 0, fmt.Errorf("ui: an unsupported graphics library is specified by the environment variable: %s", env)
 		}
@@ -89,6 +92,12 @@ func newGraphicsDriver(creator graphicsDriverCreator, graphicsLibrary GraphicsLi
 			return nil, 0, err
 		}
 		return g, GraphicsLibraryPlayStation5, nil
+	case GraphicsLibraryVulkan:
+		g, err := creator.newVulkan()
+		if err != nil {
+			return nil, 0, err
+		}
+		return g, GraphicsLibraryVulkan, nil
 	default:
 		return nil, 0, fmt.Errorf("ui: an unsupported graphics library is specified: %d", graphicsLibrary)
 	}
@@ -108,6 +117,7 @@ const (
 	GraphicsLibraryMetal
 	GraphicsLibraryPlayStation5
 	GraphicsLibraryRemote
+	GraphicsLibraryVulkan
 )
 
 func (g GraphicsLibrary) String() string {
@@ -126,6 +136,8 @@ func (g GraphicsLibrary) String() string {
 		return "PlayStation 5"
 	case GraphicsLibraryRemote:
 		return "Remote"
+	case GraphicsLibraryVulkan:
+		return "Vulkan"
 	default:
 		return fmt.Sprintf("GraphicsLibrary(%d)", g)
 	}

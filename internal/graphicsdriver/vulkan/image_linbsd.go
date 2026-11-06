@@ -19,6 +19,7 @@ package vulkan
 import (
 	"fmt"
 
+	"github.com/hajimehoshi/ebiten/v2/internal/graphics"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan/vk"
 )
@@ -36,7 +37,15 @@ type Image struct {
 	layout uint32
 }
 
+// NewImage is an image of Ebitengine's internal size for width × height
+// (graphics.InternalImageSize: a power of two, at least 16), as the other
+// drivers make them — the projection Ebitengine sends is for that size.
 func (g *Graphics) NewImage(width, height int) (graphicsdriver.Image, error) {
+	return g.newImage(graphics.InternalImageSize(width), graphics.InternalImageSize(height))
+}
+
+// newImage is an image of exactly width × height.
+func (g *Graphics) newImage(width, height int) (*Image, error) {
 	img, err := g.device.CreateImage2D(uint32(width), uint32(height), vk.FormatR8G8B8A8Unorm,
 		vk.ImageUsageTransferSrcBit|vk.ImageUsageTransferDstBit|vk.ImageUsageSampledBit|vk.ImageUsageColorAttachmentBit)
 	if err != nil {

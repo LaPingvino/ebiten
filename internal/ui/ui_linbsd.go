@@ -29,6 +29,7 @@ import (
 	"github.com/hajimehoshi/ebiten/v2/internal/glfw"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver"
 	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/opengl"
+	"github.com/hajimehoshi/ebiten/v2/internal/graphicsdriver/vulkan"
 )
 
 func (u *UserInterface) initializePlatform() error {
@@ -63,6 +64,10 @@ func (*graphicsDriverCreatorImpl) newMetal() (graphicsdriver.Graphics, error) {
 
 func (*graphicsDriverCreatorImpl) newPlayStation5() (graphicsdriver.Graphics, error) {
 	return nil, errors.New("ui: PlayStation 5 is not supported in this environment")
+}
+
+func (g *graphicsDriverCreatorImpl) newVulkan() (graphicsdriver.Graphics, error) {
+	return vulkan.NewGraphics(g.colorSpace)
 }
 
 func isGLXExtensionForGL2Available() bool {

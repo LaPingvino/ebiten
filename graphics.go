@@ -61,6 +61,10 @@ const (
 	// GraphicsLibraryRemote represents a virtualization guest that forwards its graphics commands to a
 	// host process rather than rendering on a local GPU.
 	GraphicsLibraryRemote GraphicsLibrary = GraphicsLibrary(ui.GraphicsLibraryRemote)
+
+	// GraphicsLibraryVulkan represents the graphics library Vulkan (Linux and the BSDs; chosen with
+	// GraphicsLibrary or EBITENGINE_GRAPHICS_LIBRARY=vulkan, never automatically yet).
+	GraphicsLibraryVulkan GraphicsLibrary = GraphicsLibrary(ui.GraphicsLibraryVulkan)
 )
 
 // String returns a string representing the graphics library.
