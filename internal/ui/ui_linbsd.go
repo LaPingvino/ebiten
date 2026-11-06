@@ -225,9 +225,13 @@ func monitorFromWindowByOS(_ *glfw.Window) (*Monitor, error) {
 	return nil, nil
 }
 
+// nativeWindow is the X11 Window (drivers presenting on their own — Vulkan —
+// make their surface on it; Linux gamepads don't use it).
 func (u *glfwBackend) nativeWindow() (uintptr, error) {
-	// TODO: Implement this.
-	return 0, nil
+	if u.window == nil {
+		return 0, nil
+	}
+	return u.window.GetX11Window()
 }
 
 func (u *glfwBackend) isWindowOccluded() (bool, error) {

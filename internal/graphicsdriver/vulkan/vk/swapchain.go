@@ -198,6 +198,7 @@ func (d *Device) loadExt() error {
 		{"vkQueuePresentKHR", &d.ext.queuePresent},
 		{"vkCreateSemaphore", &d.ext.createSemaphore},
 		{"vkDestroySemaphore", &d.ext.destroySemaphore},
+		{"vkCmdBlitImage", &d.ext.cmdBlitImage},
 	} {
 		n := cstr(f.name)
 		*f.p, _, _ = purego.SyscallN(d.get, d.handle, uintptr(unsafe.Pointer(n)))
@@ -330,4 +331,27 @@ func (d *Device) QueueSubmitSync(q Queue, f Fence, wait Semaphore, waitStage uin
 	pinner.Pin(info)
 	r, _, _ := purego.SyscallN(d.fn.queueSubmit, uintptr(q), 1, uintptr(unsafe.Pointer(info)), uintptr(f))
 	return result(r)
+}
+
+// ImageBlit is VkImageBlit: a source region (two corners) scaled into a
+// destination one.
+type ImageBlit struct {
+	SrcSubresource ImageSubresourceLayers
+	SrcOffsets     [2]Offset3D
+	DstSubresource ImageSubresourceLayers
+	DstOffsets     [2]Offset3D
+}
+
+// CmdBlitImage is vkCmdBlitImage of one region (converting the formats —
+// the screen's RGBA into a swapchain's BGRA).
+func (d *Device) CmdBlitImage(cb CommandBuffer, src Image, srcLayout uint32, dst Image, dstLayout uint32, region ImageBlit, filter uint32) {
+	if d.loadExt() != nil {
+		return
+	}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	r := new(ImageBlit)
+	*r = region
+	pinner.Pin(r)
+	purego.SyscallN(d.ext.cmdBlitImage, uintptr(cb), uintptr(src), uintptr(srcLayout), uintptr(dst), uintptr(dstLayout), 1, uintptr(unsafe.Pointer(r)), uintptr(filter))
 }

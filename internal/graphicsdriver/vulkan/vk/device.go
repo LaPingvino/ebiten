@@ -32,6 +32,7 @@ type Device struct {
 		loaded                                                                  bool
 		createSwapchain, destroySwapchain, getSwapchainImages, acquireNextImage uintptr
 		queuePresent, createSemaphore, destroySemaphore                         uintptr
+		cmdBlitImage                                                            uintptr
 	}
 	fn struct {
 		destroyDevice, getDeviceQueue, deviceWaitIdle                                  uintptr

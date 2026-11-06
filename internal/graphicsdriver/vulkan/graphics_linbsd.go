@@ -60,6 +60,10 @@ type Graphics struct {
 	images      map[graphicsdriver.ImageID]*Image
 	nextImageID graphicsdriver.ImageID
 
+	// Presenting (present_linbsd.go).
+	presenting
+	screen *Image
+
 	// Drawing (draw_linbsd.go).
 	shaders        map[graphicsdriver.ShaderID]*Shader
 	nextShaderID   graphicsdriver.ShaderID
@@ -94,10 +98,23 @@ func (g *Graphics) Initialize() error {
 	if debugCallback != nil {
 		exts, layers = []string{vk.ExtDebugUtils}, []string{vk.LayerKhronosValidation}
 	}
-	instance, err := vk.CreateInstance("ebitengine", vk.APIVersion13, exts, layers)
+	// The window system's extensions where the loader has them (presenting,
+	// present_linbsd.go); without them the screen is drawn and not shown.
+	wsi := []string{vk.ExtSurface, vk.ExtXlibSurface}
+	instance, err := vk.CreateInstance("ebitengine", vk.APIVersion13, append(exts, wsi...), layers)
+	if err == nil {
+		g.hasSurfaceExt = true
+	}
+	if err != nil && errors.Is(err, vk.ErrorExtensionNotPresent) {
+		instance, err = vk.CreateInstance("ebitengine", vk.APIVersion13, exts, layers)
+	}
 	if err != nil && debugCallback != nil && (errors.Is(err, vk.ErrorLayerNotPresent) || errors.Is(err, vk.ErrorExtensionNotPresent)) {
 		exts, layers = nil, nil
-		instance, err = vk.CreateInstance("ebitengine", vk.APIVersion13, nil, nil)
+		instance, err = vk.CreateInstance("ebitengine", vk.APIVersion13, wsi, nil)
+		g.hasSurfaceExt = err == nil
+		if err != nil {
+			instance, err = vk.CreateInstance("ebitengine", vk.APIVersion13, nil, nil)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("vulkan: %w", err)
@@ -134,7 +151,16 @@ func (g *Graphics) Initialize() error {
 	if !found {
 		return errors.New("vulkan: no Vulkan 1.3 device with a graphics queue")
 	}
-	if g.device, err = vk.CreateDevice(instance, g.physical, g.family, &vk.PhysicalDeviceVulkan13Features{Synchronization2: 1, DynamicRendering: 1}, nil); err != nil {
+	features := &vk.PhysicalDeviceVulkan13Features{Synchronization2: 1, DynamicRendering: 1}
+	if g.hasSurfaceExt {
+		if g.device, err = vk.CreateDevice(instance, g.physical, g.family, features, []string{vk.ExtSwapchain}); err == nil {
+			g.hasSwapchainExt = true
+		}
+	}
+	if g.device == nil {
+		g.device, err = vk.CreateDevice(instance, g.physical, g.family, features, nil)
+	}
+	if err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
 	g.queue = g.device.Queue(g.family, 0)
@@ -163,6 +189,7 @@ func (g *Graphics) destroy() {
 		_ = g.flush()
 		_ = g.device.WaitIdle()
 		g.retireUpTo(g.serial, true)
+		g.destroyPresenting()
 		for _, img := range g.images {
 			img.Dispose()
 		}
@@ -192,7 +219,17 @@ func (g *Graphics) ColorSpace() color.ColorSpace { return g.colorSpace }
 
 func (g *Graphics) Begin() error { return nil }
 
-func (g *Graphics) End(mode graphicsdriver.FlushMode) error { return g.flush() }
+func (g *Graphics) End(mode graphicsdriver.FlushMode) error {
+	if mode == graphicsdriver.FlushModePresent && g.screen != nil {
+		if !g.surfaceTried {
+			g.makeSurface()
+		}
+		if g.surface != 0 {
+			return g.present()
+		}
+	}
+	return g.flush()
+}
 
 // framesInFlight is how many batches may be submitted and not yet done:
 // the CPU records the next while the device runs the ones before.
@@ -244,7 +281,7 @@ func (g *Graphics) flush() error {
 	if err := g.device.EndCommandBuffer(b.cb); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
-	if err := g.device.QueueSubmitFence(g.queue, b.fence, b.cb); err != nil {
+	if err := g.device.QueueSubmitSync(g.queue, b.fence, g.submitWait, g.submitWaitStage, g.submitSignal, b.cb); err != nil {
 		return fmt.Errorf("vulkan: %w", err)
 	}
 	b.serial, b.after, b.inFlight = g.serial, g.afterBatch, true
@@ -325,7 +362,12 @@ func (g *Graphics) SetTransparent(transparent bool) {}
 // NewScreenFramebufferImage is, until the swapchain (V5), an offscreen image:
 // games run and draw, nothing is presented.
 func (g *Graphics) NewScreenFramebufferImage(width, height int) (graphicsdriver.Image, error) {
-	return g.newImage(width, height) // the screen: its exact size
+	img, err := g.newImage(width, height) // the screen: its exact size, blitted to the swapchain at present
+	if err != nil {
+		return nil, err
+	}
+	g.screen = img
+	return img, nil
 }
 
 func (g *Graphics) SetVsyncEnabled(enabled bool) {}
