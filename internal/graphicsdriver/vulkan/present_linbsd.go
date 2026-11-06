@@ -198,6 +198,7 @@ func (g *Graphics) present() error {
 		SrcQueueFamilyIndex: vk.QueueFamilyIgnored, DstQueueFamilyIndex: vk.QueueFamilyIgnored, Image: img, SubresourceRange: vk.ColorRange,
 	})
 	layers := vk.ImageSubresourceLayers{AspectMask: vk.ImageAspectColorBit, LayerCount: 1}
+	g.closeRendering(cb)
 	g.device.CmdBlitImage(cb, g.screen.image, vk.ImageLayoutTransferSrcOptimal, img, vk.ImageLayoutTransferDstOptimal, vk.ImageBlit{
 		SrcSubresource: layers, SrcOffsets: [2]vk.Offset3D{{}, {X: int32(g.screen.width), Y: int32(g.screen.height), Z: 1}},
 		DstSubresource: layers, DstOffsets: [2]vk.Offset3D{{}, {X: int32(g.swapW), Y: int32(g.swapH), Z: 1}},

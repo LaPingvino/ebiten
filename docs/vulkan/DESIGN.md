@@ -51,8 +51,11 @@ allocations.
 
 **Draws.** `SetVertices` copies the batch's vertices and indices into the ring; `DrawTriangles` renders into
 its destination with the contents kept (`VK_ATTACHMENT_LOAD_OP_LOAD`), binds them, and issues one indexed
-draw per destination region, each with its scissor. Each `DrawTriangles` is its own `vkCmdBeginRendering` …
-`vkCmdEndRendering`; merging a run of draws to one destination is an optimisation not made yet.
+draw per destination region, each with its scissor. A run of draws to one destination shares one
+`vkCmdBeginRendering` … `vkCmdEndRendering`: the pass stays open until something that may not happen inside
+one — a layout change, a copy, a clear, a blit, the end of the command buffer — closes it (`closeRendering`).
+On lavapipe that saves allocations (7 220 → 6 424 a 200-draw batch) but no measurable time; tiling GPUs are
+where fewer passes count.
 
 **Pipelines** are cached per shader by blend (the destination is always RGBA8): the blend maps one to one onto
 `VkPipelineColorBlendAttachmentState` (§1); the vertex input is Ebitengine's fixed 12-float format, one
@@ -132,5 +135,5 @@ its messages on stderr; the driver's own tests turn it on themselves and fail on
 3. The driver, offscreen: images, `WritePixels`, `DrawTriangles`, read-backs — Ebitengine's tests. **Done.**
 4. The screen: surface, swapchain, present, vsync, resize. **Done.**
 5. Device loss: reported and explained (see Decisions — recovering needs saved images Ebitengine doesn't
-   keep). Still open: merging draws to one destination into one rendering pass, a suballocator for images,
-   and frame times against OpenGL on a real GPU.
+   keep). Draws to one destination merged into one pass. Still open: a suballocator for images, and frame
+   times against OpenGL on a real GPU.

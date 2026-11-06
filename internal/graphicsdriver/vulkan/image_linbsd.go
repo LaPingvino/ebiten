@@ -102,6 +102,7 @@ func (i *Image) transition(cb vk.CommandBuffer, layout uint32) {
 	if i.layout == layout {
 		return
 	}
+	i.g.closeRendering(cb) // no layout change inside a rendering pass
 	i.g.device.CmdImageBarrier(cb, vk.ImageMemoryBarrier2{
 		SrcStageMask: vk.PipelineStage2AllCommands, SrcAccessMask: vk.Access2MemoryWrite,
 		DstStageMask: vk.PipelineStage2AllCommands, DstAccessMask: vk.Access2MemoryRead | vk.Access2MemoryWrite,
@@ -152,10 +153,12 @@ func (i *Image) WritePixels(args []graphicsdriver.PixelsArgs) error {
 	}
 	if i.layout == vk.ImageLayoutUndefined && !coversWhole(i, args) {
 		// The rest of a new image is transparent black, as in the other drivers.
+		g.closeRendering(cb)
 		i.transition(cb, vk.ImageLayoutTransferDstOptimal)
 		g.device.CmdClearColorImage(cb, i.image, vk.ImageLayoutTransferDstOptimal, [4]float32{})
 	}
 	i.transition(cb, vk.ImageLayoutTransferDstOptimal)
+	g.closeRendering(cb)
 	g.device.CmdCopyBufferToImage(cb, staging.buf, i.image, vk.ImageLayoutTransferDstOptimal, copies...)
 	return nil
 }
@@ -193,6 +196,7 @@ func (i *Image) ReadPixelsAsync(args []graphicsdriver.PixelsArgs) (graphicsdrive
 		return nil, err
 	}
 	if i.layout == vk.ImageLayoutUndefined { // never written: transparent black
+		g.closeRendering(cb)
 		i.transition(cb, vk.ImageLayoutTransferDstOptimal)
 		g.device.CmdClearColorImage(cb, i.image, vk.ImageLayoutTransferDstOptimal, [4]float32{})
 	}
@@ -204,6 +208,7 @@ func (i *Image) ReadPixelsAsync(args []graphicsdriver.PixelsArgs) (graphicsdrive
 		off += uint64(4 * rg.Dx() * rg.Dy())
 	}
 	i.transition(cb, vk.ImageLayoutTransferSrcOptimal)
+	g.closeRendering(cb)
 	g.device.CmdCopyImageToBuffer(cb, i.image, vk.ImageLayoutTransferSrcOptimal, buf.buf, copies...)
 	// The host reads the buffer after the batch: QueueWaitIdle makes the
 	// device's writes visible to it (host-coherent memory).

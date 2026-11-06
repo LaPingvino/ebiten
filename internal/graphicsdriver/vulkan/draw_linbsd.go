@@ -331,6 +331,7 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 			return errors.New("vulkan: DrawTriangles: an image drawn onto itself")
 		}
 		if src.layout == vk.ImageLayoutUndefined { // never written: transparent black
+			g.closeRendering(cb)
 			src.transition(cb, vk.ImageLayoutTransferDstOptimal)
 			g.device.CmdClearColorImage(cb, src.image, vk.ImageLayoutTransferDstOptimal, [4]float32{})
 		}
@@ -342,6 +343,7 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 		g.device.WriteCombinedImageSampler(set, uint32(1+k), g.sampler, view, vk.ImageLayoutShaderReadOnlyOptimal)
 	}
 	if dst.layout == vk.ImageLayoutUndefined {
+		g.closeRendering(cb)
 		dst.transition(cb, vk.ImageLayoutTransferDstOptimal)
 		g.device.CmdClearColorImage(cb, dst.image, vk.ImageLayoutTransferDstOptimal, [4]float32{})
 	}
@@ -350,8 +352,12 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 	if err != nil {
 		return err
 	}
-	full := vk.Rect2D{Extent: vk.Extent2D{Width: uint32(dst.width), Height: uint32(dst.height)}}
-	g.device.CmdBeginRenderingLoad(cb, view, full)
+	if g.renderingDst != dst { // a run of draws to one destination shares one rendering pass
+		g.closeRendering(cb)
+		full := vk.Rect2D{Extent: vk.Extent2D{Width: uint32(dst.width), Height: uint32(dst.height)}}
+		g.device.CmdBeginRenderingLoad(cb, view, full)
+		g.renderingDst = dst
+	}
 	g.device.CmdBindGraphicsPipeline(cb, pipeline)
 	g.device.CmdSetViewport(cb, vk.Viewport{Width: float32(dst.width), Height: float32(dst.height), MaxDepth: 1})
 	g.device.CmdBindVertexBuffer(cb, g.vertexBuf.buf, g.vertexOff)
@@ -365,6 +371,15 @@ func (g *Graphics) DrawTriangles(dstID graphicsdriver.ImageID, srcIDs [graphics.
 		}
 		indexOffset += r.IndexCount
 	}
-	g.device.CmdEndRendering(cb)
-	return nil
+	return nil // the pass stays open for the next draw to dst (closeRendering ends it)
+}
+
+// closeRendering ends the open rendering pass, if any: before a layout
+// change, a copy, a clear, a blit or the end of the command buffer — none of
+// them may happen inside one.
+func (g *Graphics) closeRendering(cb vk.CommandBuffer) {
+	if g.renderingDst != nil {
+		g.device.CmdEndRendering(cb)
+		g.renderingDst = nil
+	}
 }

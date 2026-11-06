@@ -73,6 +73,7 @@ type Graphics struct {
 	emptyImage     *Image
 	descPool       vk.DescriptorPool
 	descUsed       int
+	renderingDst   *Image      // the destination of the open rendering pass (nil: none; draw_linbsd.go)
 	vertexBuf      *hostBuffer // where SetVertices put them: the batch's ring
 	vertexOff      uint64
 	indexBuf       *hostBuffer
@@ -278,6 +279,7 @@ func (g *Graphics) flush() error {
 	}
 	g.recording = false
 	b := &g.batches[g.cur]
+	g.closeRendering(b.cb)
 	if err := g.device.EndCommandBuffer(b.cb); err != nil {
 		return deviceError(err)
 	}
